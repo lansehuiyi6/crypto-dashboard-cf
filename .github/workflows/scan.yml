@@ -11,15 +11,36 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24'
+
+      - name: Check secrets
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          missing=0
+          if [ -z "$WORKER_URL" ]; then
+            echo "::error::缺少 GitHub Secret WORKER_URL。到 Settings → Secrets and variables → Actions 添加，值为 https://crypto-dashboard.lansehuiyi6.workers.dev"
+            missing=1
+          else
+            echo "WORKER_URL is set"
+          fi
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::缺少 GitHub Secret CRON_SECRET。必须和本机 .dev.vars / wrangler secret 里的那串完全一致"
+            missing=1
+          else
+            echo "CRON_SECRET is set"
+          fi
+          exit $missing
 
       - name: Scan and push to Cloudflare
         env:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          HISTORY_LIMIT: '20'
         run: node scripts/scan-and-push.mjs

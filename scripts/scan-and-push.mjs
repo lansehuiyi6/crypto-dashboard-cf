@@ -6,7 +6,12 @@
  *   WORKER_URL   例如 https://crypto-dashboard.lansehuiyi6.workers.dev
  *   CRON_SECRET  与 wrangler secret CRON_SECRET 相同
  */
-import { generateMarketSignals, generateTrendingSignals } from '../src/signal-engine.js';
+import {
+  fetchTopCoins,
+  fetchCoinHistory,
+  generateCoinSignal,
+  generateTrendingSignals,
+} from '../src/signal-engine.js';
 
 const WORKER_URL = (process.env.WORKER_URL || '').replace(/\/$/, '');
 const CRON_SECRET = process.env.CRON_SECRET || '';
@@ -44,19 +49,29 @@ async function fetchJson(url, opts = {}, tries = 4) {
 }
 
 async function ingest(type, payload = {}) {
-  const res = await fetch(`${WORKER_URL}/api/ingest`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${CRON_SECRET}`,
-    },
-    body: JSON.stringify({ type, ...payload }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`ingest ${type} failed: ${res.status} ${JSON.stringify(data)}`);
+  let lastErr;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const res = await fetch(`${WORKER_URL}/api/ingest`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${CRON_SECRET}`,
+        },
+        body: JSON.stringify({ type, ...payload }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(`ingest ${type} failed: ${res.status} ${JSON.stringify(data)}`);
+      }
+      return data;
+    } catch (e) {
+      lastErr = e;
+      console.warn('[scan] ingest retry', type, e.message);
+      await sleep(2000 * (i + 1));
+    }
   }
-  return data;
+  throw lastErr;
 }
 
 async function fetchValuescan(path) {
@@ -92,7 +107,9 @@ function alertMapFrom(raw) {
 
 async function main() {
   if (!WORKER_URL || !CRON_SECRET) {
-    throw new Error('WORKER_URL and CRON_SECRET are required');
+    throw new Error(
+      'WORKER_URL and CRON_SECRET are required. Add them in GitHub → Settings → Secrets and variables → Actions',
+    );
   }
 
   console.log('[scan] start', new Date().toISOString(), '->', WORKER_URL);
@@ -143,8 +160,48 @@ async function main() {
     vsAlert: !!vsAlert,
   });
 
-  console.log('[scan] generating market signals...');
-  const result = await generateMarketSignals({ limit: 250, includeVolHistory: true });
+  console.log('[scan] fetching top coins...');
+  const coins = await fetchTopCoins(250);
+  console.log('[scan] got', coins.length, 'coins, scoring...');
+
+  const historyById = {};
+  const historyLimit = Number(process.env.HISTORY_LIMIT || 20);
+  for (let i = 0; i < Math.min(historyLimit, coins.length); i++) {
+    try {
+      historyById[coins[i].id] = await fetchCoinHistory(coins[i].id, 7);
+      if ((i + 1) % 5 === 0) console.log('[scan] history', i + 1, '/', historyLimit);
+    } catch (e) {
+      console.warn('[scan] history skip', coins[i].id, e.message);
+    }
+    await sleep(250);
+  }
+
+  const signals = [];
+  for (const coin of coins) {
+    try {
+      const history = historyById[coin.id];
+      signals.push(generateCoinSignal(coin, history?.volumes || null, history?.prices || null));
+    } catch { /* skip */ }
+  }
+  signals.sort((a, b) => b.scores.composite - a.scores.composite);
+
+  const summary = {
+    totalScanned: coins.length,
+    totalSignals: signals.length,
+    strongBuy: signals.filter(s => s.scores.composite >= 75).length,
+    buy: signals.filter(s => s.scores.composite >= 62 && s.scores.composite < 75).length,
+    watch: signals.filter(s => s.scores.composite >= 55 && s.scores.composite < 62).length,
+    neutral: signals.filter(s => s.scores.composite >= 45 && s.scores.composite < 55).length,
+    caution: signals.filter(s => s.scores.composite >= 35 && s.scores.composite < 45).length,
+    riskAlert: signals.filter(s => s.scores.composite < 35).length,
+    fomoCount: signals.filter(s => s.fomo.fomo).length,
+    fundMovementBullish: signals.filter(s => s.fundMovement.type === 'bullish').length,
+    fundMovementBearish: signals.filter(s => s.fundMovement.type === 'bearish').length,
+    reversalCount: signals.filter(s => s.reversal).length,
+    bottomReversalCount: signals.filter(s => s.bottomReversal).length,
+    generatedAt: new Date().toISOString(),
+  };
+  const result = { summary, signals };
   console.log('[scan] signals', result.signals.length, 'scanned', result.summary.totalScanned);
 
   for (let i = 0; i < result.signals.length; i += CHUNK) {
