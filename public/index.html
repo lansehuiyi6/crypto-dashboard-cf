@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>加密资产短线投资看板 | Crypto Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <div class="header-left">
+        <h1>Crypto Dashboard</h1>
+        <span class="subtitle">加密资产短线投资看板 · valuescan + 市场信号</span>
+      </div>
+      <div class="header-right">
+        <span id="lastUpdate" class="last-update"></span>
+        <button id="refreshBtn" class="btn-refresh">刷新数据</button>
+      </div>
+    </header>
+
+    <section class="price-bar" id="priceBar">
+      <div class="price-card"><span class="coin-label">BTC</span><span class="coin-price" id="btcPrice">--</span><span class="coin-change" id="btcChange"></span></div>
+      <div class="price-card"><span class="coin-label">ETH</span><span class="coin-price" id="ethPrice">--</span><span class="coin-change" id="ethChange"></span></div>
+      <div class="price-card"><span class="coin-label">BNB</span><span class="coin-price" id="bnbPrice">--</span><span class="coin-change" id="bnbChange"></span></div>
+      <div class="price-card"><span class="coin-label">SOL</span><span class="coin-price" id="solPrice">--</span><span class="coin-change" id="solChange"></span></div>
+      <div class="price-card"><span class="coin-label">XRP</span><span class="coin-price" id="xrpPrice">--</span><span class="coin-change" id="xrpChange"></span></div>
+      <div class="price-card"><span class="coin-label">DOGE</span><span class="coin-price" id="dogePrice">--</span><span class="coin-change" id="dogeChange"></span></div>
+      <div class="price-card price-card-gold"><span class="coin-label">XAU</span><span class="coin-price" id="xauPrice">--</span><span class="coin-change" id="xauChange"></span></div>
+    </section>
+
+    <div class="market-stats" id="marketStats"></div>
+
+    <div class="gold-bar" id="goldBar"></div>
+
+    <!-- === 涨势反转专区 === -->
+    <section class="reversal-section" id="reversalSection">
+      <div class="reversal-header">
+        <h2>📉 涨势反转信号 <span class="reversal-badge">EMA Death Cross</span></h2>
+        <div class="reversal-desc">
+          检测长期上涨后的顶部反转信号：1h 级别 <code>EMA5 &gt; EMA21 &gt; EMA56</code> 多头排列 → EMA5 死叉 EMA21<br>
+          通常意味着阶段性顶部，是做空/止盈的时机。强度评分越高，反转可信度越高。
+        </div>
+      </div>
+
+      <div class="reversal-cards" id="reversalCards">
+        <div class="loading">正在扫描 1h EMA 死叉信号...</div>
+      </div>
+    </section>
+
+    <!-- === 跌势反转专区 === -->
+    <section class="reversal-section bottom-reversal-section" id="bottomReversalSection">
+      <div class="reversal-header bottom-reversal-header">
+        <h2>📈 跌势反转信号 <span class="reversal-badge bottom-reversal-badge">EMA Golden Cross</span></h2>
+        <div class="reversal-desc bottom-reversal-desc">
+          检测长期下跌后的底部反转信号：1h 级别 <code>EMA5 &lt; EMA21 &lt; EMA56</code> 空头排列 → EMA5 金叉 EMA21<br>
+          通常意味着阶段性底部，是做多/抄底的时机。强度评分越高，反转可信度越高。
+        </div>
+      </div>
+
+      <div class="reversal-cards" id="bottomReversalCards">
+        <div class="loading">正在扫描 1h EMA 金叉信号...</div>
+      </div>
+    </section>
+
+    <!-- === 自有信号引擎 === -->
+    <section class="signal-engine-section" id="signalEngineSection">
+      <div class="signal-engine-header">
+        <div class="signal-engine-title-row">
+          <h2>自有信号引擎 <span class="engine-badge">AI Signal Engine</span></h2>
+          <button class="btn-collapse" id="collapseBtn" title="折叠/展开">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="signal-tabs" id="signalTabs">
+          <button class="tab-btn active" data-filter="all">全部</button>
+          <button class="tab-btn" data-filter="bullish">看涨信号</button>
+          <button class="tab-btn" data-filter="bearish">看跌信号</button>
+          <button class="tab-btn" data-filter="fomo">FOMO</button>
+          <button class="tab-btn" data-filter="fundMovement">资金异动</button>
+          <button class="tab-btn tab-btn-reversal" data-filter="reversal">📉 涨势反转</button>
+          <button class="tab-btn tab-btn-bottom-reversal" data-filter="bottomReversal">📈 跌势反转</button>
+          <span class="tab-divider"></span>
+          <button class="tab-btn" data-filter="all" data-stage="emerging">🆕 新信号</button>
+          <button class="tab-btn" data-filter="all" data-stage="fading">⚠️ 衰减中</button>
+          <button class="tab-btn" data-filter="all" data-stage="reversing">🔄 可能反转</button>
+          <span class="tab-divider"></span>
+          <button class="tab-btn" data-filter="all" data-stage="extended">📈 行情扩展</button>
+          <button class="tab-btn" data-filter="all" data-stage="exhaustion">⚠️ 可耗竭</button>
+        </div>
+      </div>
+
+      <div class="signal-engine-body" id="signalEngineBody">
+        <div class="signal-summary" id="signalSummary">
+          <div class="loading">信号引擎计算中... (扫描 Top 250 代币, 约需 15-30 秒)</div>
+        </div>
+
+        <div class="signal-cards" id="signalCards">
+        </div>
+      </div>
+    </section>
+
+    <div class="main-grid">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ValueScan 机会看涨</h2>
+          <span class="panel-count" id="longCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div id="longList" class="token-list">
+            <div class="loading">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ValueScan 风险看跌</h2>
+          <span class="panel-count" id="shortCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div id="shortList" class="token-list">
+            <div class="loading">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ValueScan 资金异动</h2>
+          <span class="panel-count" id="alertCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div id="alertList" class="token-list">
+            <div class="loading">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>短线操作信号</h2>
+        </div>
+        <div class="panel-body">
+          <div id="signalList"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="lower-grid">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>代币解锁日历 (抛压风险)</h2>
+        </div>
+        <div class="panel-body">
+          <table class="data-table" id="unlockTable">
+            <thead>
+              <tr><th>代币</th><th>日期</th><th>金额</th><th>占比</th><th>风险</th></tr>
+            </thead>
+            <tbody id="unlockBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>热门代币 & 趋势</h2>
+        </div>
+        <div class="panel-body">
+          <table class="data-table">
+            <thead>
+              <tr><th>代币</th><th>涨幅</th><th>标签</th><th>备注</th></tr>
+            </thead>
+            <tbody id="trendingBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>新币上线</h2>
+        </div>
+        <div class="panel-body">
+          <table class="data-table">
+            <thead>
+              <tr><th>代币</th><th>交易所</th><th>状态</th></tr>
+            </thead>
+            <tbody id="listingBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>核心叙事 & 关键事件</h2>
+        </div>
+        <div class="panel-body">
+          <div id="narrativeList"></div>
+          <h3 class="sub-title">关键事件</h3>
+          <div id="eventList"></div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>数据来源: ValueScan.io API, CoinGecko, MEXC, CoinMarketCap, OKX Orbit | 仅供参考, 不构成投资建议</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+name = "crypto-dashboard"
+main = "src/index.js"
+compatibility_date = "2026-08-17"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[durable_objects.bindings]]
+name = "SIGNAL_STORE"
+class_name = "SignalStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalStore"]
