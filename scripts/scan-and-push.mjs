@@ -12,6 +12,9 @@ import {
   generateCoinSignal,
   generateTrendingSignals,
 } from '../src/signal-engine.js';
+import { buildMajors } from '../src/market-signals.js';
+import { fetchGlobalOverview } from '../src/live-market.js';
+import { fetchAllStrategies } from '../src/ema-strategy.js';
 
 const WORKER_URL = (process.env.WORKER_URL || '').replace(/\/$/, '');
 const CRON_SECRET = process.env.CRON_SECRET || '';
@@ -114,7 +117,7 @@ async function main() {
 
   console.log('[scan] start', new Date().toISOString(), '->', WORKER_URL);
 
-  const [prices, gold, vsLong, vsShort, vsAlert] = await Promise.all([
+  const [prices, gold, vsLong, vsShort, vsAlert, global] = await Promise.all([
     fetchJson(`https://api.coingecko.com/api/v3/simple/price?ids=${PRICE_IDS}&vs_currencies=usd&include_24hr_change=true`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CryptoDashboardScan/1.0)', Accept: 'application/json' },
     }).catch((e) => {
@@ -139,6 +142,10 @@ async function main() {
       console.warn('[scan] valuescan alert failed', e.message);
       return null;
     }),
+    fetchGlobalOverview().catch((e) => {
+      console.warn('[scan] global failed', e.message);
+      return null;
+    }),
   ]);
 
   await ingest('begin');
@@ -151,6 +158,7 @@ async function main() {
       alert: vsAlert,
     },
     vsAlertMap: vsAlert ? alertMapFrom(vsAlert) : {},
+    global: global || undefined,
   });
   console.log('[scan] snapshot pushed', {
     prices: !!prices,
@@ -175,6 +183,17 @@ async function main() {
     }
     await sleep(250);
   }
+
+  const majors = buildMajors(coins, historyById, gold);
+  let strategies = {};
+  try {
+    strategies = await fetchAllStrategies('1h');
+    console.log('[scan] strategies', Object.keys(strategies).filter((k) => strategies[k]));
+  } catch (e) {
+    console.warn('[scan] strategies failed', e.message);
+  }
+  await ingest('snapshot', { majors, strategies });
+  console.log('[scan] majors', Object.keys(majors));
 
   const signals = [];
   for (const coin of coins) {

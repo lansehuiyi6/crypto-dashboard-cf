@@ -92,7 +92,7 @@ CRON_SECRET=dev
 | `/api/gold/spot` | 优先读快照 |
 | `/api/valuescan/*` | 优先读快照 |
 | `/api/signals` | 读已发布信号 |
-| `/api/market-signals` | 短线操作面板 |
+| `/api/market-signals` | 短线操作面板（支撑/阻力随现价生成） |
 
 ## 注意事项
 

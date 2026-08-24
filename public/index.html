@@ -29,10 +29,58 @@
       <div class="price-card"><span class="coin-label">DOGE</span><span class="coin-price" id="dogePrice">--</span><span class="coin-change" id="dogeChange"></span></div>
       <div class="price-card price-card-gold"><span class="coin-label">XAU</span><span class="coin-price" id="xauPrice">--</span><span class="coin-change" id="xauChange"></span></div>
     </section>
+    <div class="price-stamp" id="priceStamp"></div>
 
     <div class="market-stats" id="marketStats"></div>
 
     <div class="gold-bar" id="goldBar"></div>
+
+    <div class="main-grid">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ValueScan 机会看涨</h2>
+          <span class="panel-count" id="longCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div id="longList" class="token-list">
+            <div class="loading">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ValueScan 风险看跌</h2>
+          <span class="panel-count" id="shortCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div id="shortList" class="token-list">
+            <div class="loading">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ValueScan 资金异动</h2>
+          <span class="panel-count" id="alertCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div id="alertList" class="token-list">
+            <div class="loading">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>短线操作信号</h2>
+        </div>
+        <div class="panel-body">
+          <div id="signalList"></div>
+        </div>
+      </div>
+    </div>
 
     <!-- === 涨势反转专区 === -->
     <section class="reversal-section" id="reversalSection">
@@ -102,53 +150,6 @@
         </div>
       </div>
     </section>
-
-    <div class="main-grid">
-      <div class="panel">
-        <div class="panel-header">
-          <h2>ValueScan 机会看涨</h2>
-          <span class="panel-count" id="longCount">0</span>
-        </div>
-        <div class="panel-body">
-          <div id="longList" class="token-list">
-            <div class="loading">加载中...</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <h2>ValueScan 风险看跌</h2>
-          <span class="panel-count" id="shortCount">0</span>
-        </div>
-        <div class="panel-body">
-          <div id="shortList" class="token-list">
-            <div class="loading">加载中...</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <h2>ValueScan 资金异动</h2>
-          <span class="panel-count" id="alertCount">0</span>
-        </div>
-        <div class="panel-body">
-          <div id="alertList" class="token-list">
-            <div class="loading">加载中...</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <h2>短线操作信号</h2>
-        </div>
-        <div class="panel-body">
-          <div id="signalList"></div>
-        </div>
-      </div>
-    </div>
 
     <div class="lower-grid">
       <div class="panel">

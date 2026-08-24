@@ -1,5 +1,7 @@
 import { SignalStore, getStore } from './store.js';
-import { getMarketSignals } from './market-signals.js';
+import { assembleMarketSignals } from './market-signals.js';
+import { fetchBinancePrices, fetchGlobalOverview, inverseHint } from './live-market.js';
+import { fetchAllStrategies } from './ema-strategy.js';
 
 export { SignalStore };
 
@@ -97,15 +99,17 @@ async function proxyGet(url, ctx) {
 }
 
 async function authorize(request, env) {
-  const expected = env.CRON_SECRET;
+  const expected = (env.CRON_SECRET || '').trim();
   if (!expected) return false;
   const hdr = request.headers.get('Authorization') || '';
-  const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : '';
+  const token = (hdr.startsWith('Bearer ') ? hdr.slice(7) : hdr).trim();
   const enc = new TextEncoder();
   const a = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(token)));
   const b = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(expected)));
   if (a.length !== b.length) return false;
-  return crypto.subtle.timingSafeEqual(a, b);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 async function readSnapshot(env) {
@@ -151,21 +155,67 @@ async function handleApi(request, env, ctx) {
   }
 
   if (pathname === '/api/coingecko/prices') {
-    const snap = await readSnapshot(env);
-    if (snap.prices?.data && !snap.prices.data.error && !snap.prices.data.status) {
-      return json(snap.prices.data);
-    }
+    try {
+      const live = await fetchBinancePrices();
+      if (live.bitcoin) {
+        return json({ ...live, meta: { source: 'binance', fetchedAt: Date.now() } });
+      }
+    } catch { /* fall through */ }
+
     const ids = url.searchParams.get('ids') || 'bitcoin,ethereum,binancecoin,solana,ripple,dogecoin';
-    return proxyGet(
+    const liveCg = await proxyGet(
       `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`,
       ctx,
     );
+    const cgData = await liveCg.clone().json().catch(() => null);
+    if (cgData?.bitcoin && !cgData.status && !cgData.error) {
+      return json({ ...cgData, meta: { source: 'coingecko', fetchedAt: Date.now() } });
+    }
+
+    const snap = await readSnapshot(env);
+    if (snap.prices?.data?.bitcoin && !snap.prices.data.error && !snap.prices.data.status) {
+      return json({
+        ...snap.prices.data,
+        meta: { source: 'snapshot', fetchedAt: snap.prices.timestamp || Date.now() },
+      });
+    }
+    return liveCg;
   }
 
   if (pathname === '/api/gold/spot') {
+    const live = await proxyGet('https://xaus.com/api/v1/spot', ctx);
+    const liveData = await live.clone().json().catch(() => null);
+    if (liveData?.spot_usd_oz) {
+      return json({ ...liveData, meta: { source: 'live', fetchedAt: Date.now() } });
+    }
     const snap = await readSnapshot(env);
-    if (snap.gold?.data?.spot_usd_oz) return json(snap.gold.data);
-    return proxyGet('https://xaus.com/api/v1/spot', ctx);
+    if (snap.gold?.data?.spot_usd_oz) {
+      return json({
+        ...snap.gold.data,
+        meta: { source: 'snapshot', fetchedAt: snap.gold.timestamp || Date.now() },
+      });
+    }
+    return live;
+  }
+
+  if (pathname === '/api/overview') {
+    const snap = await readSnapshot(env);
+    let overview = null;
+    let source = 'snapshot';
+    try {
+      overview = await fetchGlobalOverview(snap.global?.data || null);
+      source = 'live';
+    } catch {
+      overview = snap.global?.data || null;
+    }
+    if (!overview) return json({ error: 'overview unavailable' }, 502);
+    const btcCh = snap.prices?.data?.bitcoin?.usd_24h_change;
+    return json({
+      ...overview,
+      inverse: inverseHint(overview, btcCh),
+      source,
+      fetchedAt: overview.updatedAt || Date.now(),
+    });
   }
 
   if (pathname === '/api/signals') {
@@ -187,7 +237,24 @@ async function handleApi(request, env, ctx) {
   }
 
   if (pathname === '/api/market-signals') {
-    return json(getMarketSignals());
+    const snap = await readSnapshot(env);
+    let prices = snap.prices?.data || {};
+    let gold = snap.gold?.data || null;
+    let strategies = snap.strategies?.data || {};
+    try {
+      const live = await fetchBinancePrices();
+      if (live.bitcoin) prices = { ...prices, ...live };
+    } catch { /* keep snapshot prices */ }
+    try {
+      const liveStrat = await fetchAllStrategies('1h');
+      strategies = { ...strategies, ...liveStrat };
+    } catch { /* keep snapshot strategies */ }
+    return json(assembleMarketSignals({
+      majors: snap.majors?.data || {},
+      prices,
+      gold,
+      strategies,
+    }));
   }
 
   return json({ error: 'Not Found' }, 404);

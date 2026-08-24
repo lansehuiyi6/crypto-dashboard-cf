@@ -1,6 +1,381 @@
-export function getMarketSignals() {
+/**
+ * 短线操作面板
+ *
+ * 支撑/阻力/策略随现价生成，不再手写点位。
+ * 数据优先级: 扫描写入的 majors（含 24h 高低 + 7d 小时线）
+ *            → 价格快照（CoinGecko simple/price + 黄金现货）
+ */
+
+const MAJOR_IDS = {
+  bitcoin: { key: 'BTC', coin: 'BTC' },
+  ethereum: { key: 'ETH', coin: 'ETH' },
+  binancecoin: { key: 'BNB', coin: 'BNB' },
+  solana: { key: 'SOL', coin: 'SOL' },
+};
+
+const CARD_ORDER = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
+
+function num(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function stepFor(price) {
+  if (price >= 10000) return 50;
+  if (price >= 1000) return 5;
+  if (price >= 200) return 1;
+  if (price >= 50) return 0.5;
+  if (price >= 10) return 0.1;
+  if (price >= 1) return 0.01;
+  return 0.001;
+}
+
+function psychStep(price) {
+  if (price >= 50000) return 1000;
+  if (price >= 10000) return 500;
+  if (price >= 2000) return 50;
+  if (price >= 500) return 25;
+  if (price >= 100) return 5;
+  if (price >= 20) return 1;
+  return 0.5;
+}
+
+function roundPx(n, price) {
+  const s = stepFor(price);
+  return Math.round(n / s) * s;
+}
+
+function fmtPx(n, price) {
+  if (!Number.isFinite(n)) return '--';
+  const r = roundPx(n, price);
+  if (price >= 1000) return '$' + Math.round(r).toLocaleString('en-US');
+  if (price >= 50) return '$' + r.toFixed(r >= 100 && stepFor(price) >= 1 ? 0 : 2);
+  return '$' + r.toFixed(2);
+}
+
+function fmtSpot(n) {
+  if (!Number.isFinite(n)) return '--';
+  if (n >= 1000) return '$' + Math.round(n).toLocaleString('en-US');
+  if (n >= 100) return '$' + n.toFixed(0);
+  if (n >= 1) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(4);
+}
+
+function fmtCh(ch) {
+  if (!Number.isFinite(ch)) return '';
+  const sign = ch > 0 ? '+' : '';
+  return sign + ch.toFixed(2) + '%';
+}
+
+function joinLevels(levels, price) {
+  return levels.map((v) => fmtPx(v, price)).join(' -> ');
+}
+
+function findSwings(closes, order = 4) {
+  const lows = [];
+  const highs = [];
+  if (!closes || closes.length < order * 2 + 1) return { lows, highs };
+  for (let i = order; i < closes.length - order; i++) {
+    const window = closes.slice(i - order, i + order + 1);
+    const v = closes[i];
+    if (v === Math.min(...window)) lows.push(v);
+    if (v === Math.max(...window)) highs.push(v);
+  }
+  return { lows, highs };
+}
+
+function estimateRange(major) {
+  const price = major.price;
+  const high24 = num(major.high24);
+  const low24 = num(major.low24);
+  if (high24 && low24 && high24 > low24) return high24 - low24;
+  const ch = Math.abs(num(major.change24h) || 0) / 100;
+  return price * Math.max(0.012, ch);
+}
+
+function pickNearest(values, price, n, below) {
+  const tol = price * 0.003;
+  const filtered = values.filter((v) => Number.isFinite(v) && v > 0 && (below ? v < price * 0.999 : v > price * 1.001));
+  const sorted = filtered.sort((a, b) => (below ? b - a : a - b));
+  const out = [];
+  for (const raw of sorted) {
+    const v = roundPx(raw, price);
+    if (out.some((x) => Math.abs(x - v) < tol)) continue;
+    if (below && v >= price) continue;
+    if (!below && v <= price) continue;
+    out.push(v);
+    if (out.length >= n) break;
+  }
+  const step = psychStep(price);
+  let cursor = roundPx(price, price);
+  while (out.length < n) {
+    cursor += below ? -step : step;
+    if (cursor <= 0) break;
+    const v = roundPx(cursor, price);
+    if (out.some((x) => Math.abs(x - v) < price * 0.002)) continue;
+    if (below && v >= price) continue;
+    if (!below && v <= price) continue;
+    out.push(v);
+  }
+  return out;
+}
+
+function collectLevels(major) {
+  const price = major.price;
+  const high24 = num(major.high24);
+  const low24 = num(major.low24);
+  const range = estimateRange(major);
+  const supports = [];
+  const resistances = [];
+
+  if (low24) supports.push(low24);
+  if (high24) resistances.push(high24);
+
+  const closes = Array.isArray(major.closes) ? major.closes.filter((v) => Number.isFinite(v)) : [];
+  if (closes.length >= 24) {
+    const swings = findSwings(closes, 4);
+    supports.push(...swings.lows);
+    resistances.push(...swings.highs);
+    supports.push(Math.min(...closes));
+    resistances.push(Math.max(...closes));
+  }
+
+  supports.push(price - range, price - range * 1.6, price - range * 2.2);
+  resistances.push(price + range * 0.5, price + range * 1.2, price + range * 2);
+
+  const ps = psychStep(price);
+  let s = Math.floor(price / ps) * ps;
+  for (let i = 0; i < 5; i++) {
+    s -= ps;
+    if (s > 0) supports.push(s);
+  }
+  let r = Math.ceil(price / ps) * ps;
+  if (r <= price) r += ps;
+  for (let i = 0; i < 5; i++) {
+    resistances.push(r);
+    r += ps;
+  }
+
+  return {
+    supports: pickNearest(supports, price, 3, true),
+    resistances: pickNearest(resistances, price, 3, false),
+  };
+}
+
+function classifyBias(major) {
+  const price = major.price;
+  const change1h = num(major.change1h);
+  const change24h = num(major.change24h) || 0;
+  const change7d = num(major.change7d);
+  const high24 = num(major.high24);
+  const low24 = num(major.low24);
+  const pos = high24 && low24 && high24 > low24
+    ? (price - low24) / (high24 - low24)
+    : 0.5;
+
+  const weak = change24h < -1.5 || (change7d != null && change7d < -5 && change24h < 0);
+  const hot = change24h > 2 && pos > 0.85;
+  const pullback = change1h != null && change1h < -0.8 && change24h > 0;
+  const strong = (change7d != null && change7d > 8 && change24h > 0.5) || change24h > 1.2;
+  const wash = Math.abs(change24h) < 0.6 && pos > 0.35 && pos < 0.65;
+
+  if (weak) return { bias: '偏弱, 谨慎', color: 'gray', kind: 'weak' };
+  if (hot) return { bias: '强势上攻, 短线注意回撤', color: 'amber', kind: 'hot' };
+  if (pullback) return { bias: '冲高回落, 看支撑', color: 'blue', kind: 'pullback' };
+  if (strong) return { bias: '多头占优', color: 'amber', kind: 'bull' };
+  if (wash) return { bias: '震荡整理', color: 'blue', kind: 'range' };
+  if (change24h >= 0) return { bias: '偏多', color: 'blue', kind: 'bull' };
+  return { bias: '偏空观望', color: 'gray', kind: 'weak' };
+}
+
+function buildStrategy(kind, price, supports, resistances) {
+  const s1 = fmtPx(supports[0], price);
+  const s2 = fmtPx(supports[1] ?? supports[0] * 0.985, price);
+  const r1 = fmtPx(resistances[0], price);
+  const r2 = fmtPx(resistances[1] ?? resistances[0] * 1.015, price);
+  const bandLo = supports[0];
+  const gap = Math.max(price - bandLo, stepFor(price));
+  const bandHi = roundPx(price - gap * 0.25, price);
+  const band = bandHi > bandLo
+    ? `${fmtPx(bandLo, price)}-${fmtPx(bandHi, price)}`
+    : s1;
+
+  if (kind === 'weak') {
+    return `不做追多, 等方向选择. 跌破${s1}可右侧跟空, 目标${s2}. 反弹${r1}遇阻减仓.`;
+  }
+  if (kind === 'hot') {
+    return `靠近24h高点, 不宜追多. 回踩${band}不破可试多, 目标${r1}; 突破站稳${r1}可看${r2}. 跌破${s1}减仓.`;
+  }
+  if (kind === 'range') {
+    return `区间${s1}-${r1}高抛低吸. 突破站稳${r1}可看${r2}; 跌破${s1}看${s2}.`;
+  }
+  if (kind === 'pullback') {
+    return `短线回落, 回踩${band}不破可试多, 目标${r1}. 跌破${s1}减仓, 下一支撑${s2}.`;
+  }
+  return `回踩${band}不破可试多, 目标${r1}; 突破站稳${r1}可看${r2}. 跌破${s1}减仓.`;
+}
+
+function buildCard(major) {
+  const price = num(major.price);
+  if (!price || price <= 0) return null;
+  const { supports, resistances } = collectLevels(major);
+  if (!supports.length || !resistances.length) return null;
+  const { bias, color, kind } = classifyBias(major);
+  const change24h = num(major.change24h);
+  return {
+    coin: major.coin,
+    bias,
+    color,
+    support: joinLevels(supports, price),
+    resistance: joinLevels(resistances, price),
+    strategy: buildStrategy(kind, price, supports, resistances),
+    price,
+    change24h,
+    priceText: fmtSpot(price),
+    changeText: fmtCh(change24h),
+    emaStrategy: major.emaStrategy || null,
+  };
+}
+
+function inferHighLow(price, change24h) {
+  if (!Number.isFinite(change24h)) return { high24: null, low24: null };
+  const open = price / (1 + change24h / 100);
+  if (change24h >= 0) {
+    return {
+      high24: price,
+      low24: Math.min(open, price) * (1 - Math.abs(change24h) / 100 * 0.2),
+    };
+  }
+  return {
+    low24: price,
+    high24: Math.max(open, price) * (1 + Math.abs(change24h) / 100 * 0.2),
+  };
+}
+
+function fromSimpleQuote(coin, quote) {
+  const price = num(quote?.usd);
+  if (!price) return null;
+  const change24h = num(quote.usd_24h_change);
+  const hl = inferHighLow(price, change24h);
+  return {
+    coin,
+    price,
+    change24h,
+    change1h: null,
+    change7d: null,
+    high24: hl.high24,
+    low24: hl.low24,
+  };
+}
+
+function fromCoin(coin, history) {
+  const meta = MAJOR_IDS[coin.id];
+  if (!meta) return null;
+  const price = num(coin.current_price);
+  if (!price) return null;
+  const closes = (history?.prices || [])
+    .map((p) => (Array.isArray(p) ? num(p[1]) : num(p)))
+    .filter((v) => v != null)
+    .slice(-168);
+  return {
+    coin: meta.coin,
+    price,
+    change1h: num(coin.price_change_percentage_1h_in_currency),
+    change24h: num(coin.price_change_percentage_24h_in_currency ?? coin.price_change_percentage_24h),
+    change7d: num(coin.price_change_percentage_7d_in_currency),
+    high24: num(coin.high_24h),
+    low24: num(coin.low_24h),
+    closes: closes.length ? closes : undefined,
+  };
+}
+
+function mergeMajor(base, liveQuote, coinName) {
+  const live = fromSimpleQuote(coinName || base?.coin, liveQuote);
+  if (!base) return live;
+  if (!live) return base;
+  return {
+    ...base,
+    coin: base.coin || coinName,
+    price: live.price,
+    change24h: live.change24h ?? base.change24h,
+    high24: base.high24 ?? live.high24,
+    low24: base.low24 ?? live.low24,
+  };
+}
+
+export function buildMajors(coins = [], historyById = {}, gold = null) {
+  const out = {};
+  for (const coin of coins) {
+    const major = fromCoin(coin, historyById[coin.id]);
+    if (!major) continue;
+    const key = MAJOR_IDS[coin.id].key;
+    out[key] = major;
+  }
+  const xau = num(gold?.spot_usd_oz) ?? num(gold?.xau?.price);
+  if (xau) {
+    out.XAU = {
+      coin: 'XAU/USD',
+      price: xau,
+      change1h: null,
+      change24h: null,
+      change7d: null,
+      high24: null,
+      low24: null,
+    };
+  }
+  return out;
+}
+
+export function patchMajorsFromCoin(prev, coin, history) {
+  if (!coin || !MAJOR_IDS[coin.id]) return null;
+  const piece = buildMajors([coin], history ? { [coin.id]: history } : {}, null);
+  return { ...(prev || {}), ...piece };
+}
+
+export function assembleMarketSignals({ majors = {}, prices = {}, gold = null, strategies = {} } = {}) {
+  const editorial = getEditorial();
+  const xauLive = prices.xau || null;
+  const merged = {
+    BTC: mergeMajor(majors.BTC, prices.bitcoin, 'BTC')
+      || (gold?.btc_usd ? { coin: 'BTC', price: num(gold.btc_usd) } : null),
+    ETH: mergeMajor(majors.ETH, prices.ethereum, 'ETH'),
+    BNB: mergeMajor(majors.BNB, prices.binancecoin, 'BNB'),
+    SOL: mergeMajor(majors.SOL, prices.solana, 'SOL'),
+    XAU: mergeMajor(
+      majors.XAU || (num(gold?.spot_usd_oz) || num(gold?.xau?.price)
+        ? { coin: 'XAU/USD', price: num(gold.spot_usd_oz) ?? num(gold.xau?.price) }
+        : null),
+      xauLive,
+      'XAU/USD',
+    ),
+  };
+  for (const key of CARD_ORDER) {
+    if (merged[key] && strategies[key]) merged[key].emaStrategy = strategies[key];
+  }
+
+  const tradingSignals = CARD_ORDER
+    .map((key) => merged[key] && buildCard(merged[key]))
+    .filter(Boolean);
+
   return {
     updated: new Date().toISOString(),
+    overview: editorial.overview,
+    tradingSignals,
+    tokenUnlocks: editorial.tokenUnlocks,
+    newListings: editorial.newListings,
+    trendingTokens: editorial.trendingTokens,
+    keyEvents: editorial.keyEvents,
+    narratives: editorial.narratives,
+  };
+}
+
+export function getMarketSignals() {
+  return assembleMarketSignals();
+}
+
+function getEditorial() {
+  return {
     overview: {
       btc: { price: '$64,700', change: '+0.9%', note: '突破下降趋势线' },
       eth: { price: '$1,910', change: '+1.8%', note: '站上$1,900, EIP-8361催化' },
@@ -11,32 +386,6 @@ export function getMarketSignals() {
       btcDominance: '56.5%',
       fearGreed: '17 (极度恐惧->谨慎乐观)',
     },
-    tradingSignals: [
-      {
-        coin: 'BTC', bias: '多头占优', color: 'amber',
-        support: '$63,500 -> $62,600 -> $62,000',
-        resistance: '$65,250 -> $67,300 -> $70,800',
-        strategy: '回踩$64,000-64,400不破可试多, 目标$65,250; 突破站稳$65,000可看$67,000. 跌破$63,500减仓.',
-      },
-      {
-        coin: 'ETH', bias: '领涨, 结构最清晰', color: 'blue',
-        support: '$1,885 -> $1,800 -> $1,788',
-        resistance: '$1,918 (100日均线) -> $2,000 -> $2,074',
-        strategy: '等回踩$1,900附近不破再进场, 止损$1,885下方, 目标$1,931. MACD强买入信号.',
-      },
-      {
-        coin: 'SOL', bias: '最弱, 观望', color: 'gray',
-        support: '$73.84 -> $73.07',
-        resistance: '$74.57',
-        strategy: '不做多, 等方向选择. 跌破$73.84可右侧跟空. 美国SOL ETF连续5日零流入.',
-      },
-      {
-        coin: 'XAU/USD', bias: '突破走强, 短线超买', color: 'amber',
-        support: '$4,255 -> $4,220 -> $4,200 -> $4,165',
-        resistance: '$4,300 -> $4,345 -> $4,400 -> $4,500',
-        strategy: '昨日单日暴涨200美金(+4.14%), 突破持续数月的震荡区间. 短线RSI超买严重. 回踩$4,255-4,220不破可试多, 目标$4,300->4,345. 跌破$4,200止损. 100日/200日均线死叉仍存, 反弹视为阶段性. 中期若站稳$4,300可看$4,500.',
-      },
-    ],
     tokenUnlocks: [
       { token: 'GoldFinger (GF)', date: '8/6 (今日)', amount: '$11.52M', pct: '5.05%', risk: 'high' },
       { token: 'INFINIT (IN)', date: '8/7', amount: '$2.31M', pct: '20.30%', risk: 'high' },

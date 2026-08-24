@@ -4,6 +4,7 @@ import {
   generateCoinSignal,
   generateTrendingSignals,
 } from './signal-engine.js';
+import { patchMajorsFromCoin } from './market-signals.js';
 import { emptyHistory, enrichWithLifecycle, EXPIRE_HOURS } from './signal-tracker.js';
 import { applyFilter, SIGNAL_TYPE_RANGES } from './filters.js';
 
@@ -421,7 +422,15 @@ export class SignalStore {
       prices: this.getValue('snapshot_prices'),
       gold: this.getValue('snapshot_gold'),
       valuescan: this.getValue('snapshot_valuescan'),
+      majors: this.getValue('snapshot_majors'),
+      global: this.getValue('snapshot_global'),
+      strategies: this.getValue('snapshot_strategies'),
     });
+  }
+
+  rememberMajor(coin, history) {
+    const patched = patchMajorsFromCoin(this.getValue('snapshot_majors')?.data, coin, history);
+    if (patched) this.putValue('snapshot_majors', { data: patched, timestamp: Date.now() });
   }
 
   persistSignalBatch(signals, now) {
@@ -488,7 +497,16 @@ export class SignalStore {
       if (body.valuescan) this.putValue('snapshot_valuescan', { data: body.valuescan, timestamp: Date.now() });
       if (body.vsAlertMap) this.putValue('vs_alert', body.vsAlertMap);
       if (body.trending) this.putValue('trending', { data: body.trending, timestamp: Date.now() });
+      if (body.majors) this.putValue('snapshot_majors', { data: body.majors, timestamp: Date.now() });
+      if (body.global) this.putValue('snapshot_global', { data: body.global, timestamp: Date.now() });
+      if (body.strategies) this.putValue('snapshot_strategies', { data: body.strategies, timestamp: Date.now() });
       return json({ ok: true });
+    }
+
+    if (type === 'abort') {
+      this.ctx.storage.sql.exec('DELETE FROM scan_sig_next');
+      this.putValue('job', { phase: 'done', startedAt: Date.now() });
+      return json({ ok: true, aborted: true });
     }
 
     if (type === 'commit') {
@@ -654,6 +672,7 @@ export class SignalStore {
       try {
         const coin = JSON.parse(row.payload);
         const sig = generateCoinSignal(coin, null, null);
+        this.rememberMajor(coin, null);
         if (!sig?.symbol) continue;
         this.upsertScanNext(sig);
       } catch { /* skip one coin */ }
@@ -683,6 +702,7 @@ export class SignalStore {
         history = null;
       }
       const sig = generateCoinSignal(coin, history?.volumes || null, history?.prices || null);
+      this.rememberMajor(coin, history);
       if (!sig?.symbol) continue;
       this.upsertScanNext(sig);
     }

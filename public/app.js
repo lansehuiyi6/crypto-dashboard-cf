@@ -62,6 +62,22 @@ function setPriceNote(text) {
   note.textContent = text;
 }
 
+function setPriceStamp(meta, extra = '') {
+  const el = document.getElementById('priceStamp');
+  if (!el) return;
+  const srcMap = { binance: '币安实时', coingecko: 'CoinGecko', live: '实时', snapshot: '快照' };
+  const src = srcMap[meta?.source] || meta?.source || '';
+  const when = meta?.fetchedAt ? fmtTime(meta.fetchedAt) : '';
+  const cls = meta?.source === 'snapshot' ? 'src-snap' : 'src-live';
+  const bits = [];
+  if (src && when) bits.push(`<span class="${cls}">${src} ${when}</span>`);
+  else if (when) bits.push(when);
+  if (extra) bits.push(extra);
+  el.innerHTML = bits.join(' · ') || '';
+}
+
+let lastBtcChange = null;
+
 async function fetchCoinGeckoPrices() {
   try {
     const ids = Object.keys(COINGECKO_IDS).join(',');
@@ -82,10 +98,26 @@ async function fetchCoinGeckoPrices() {
         changeEl.className = 'coin-change ' + (ch >= 0 ? 'up' : 'down');
       }
     }
+    lastBtcChange = data.bitcoin?.usd_24h_change;
+    if (data.xau?.usd) {
+      const priceEl = document.getElementById('xauPrice');
+      const changeEl = document.getElementById('xauChange');
+      if (priceEl) priceEl.textContent = '$' + Number(data.xau.usd).toLocaleString('en-US', { maximumFractionDigits: 1 });
+      if (changeEl && data.xau.usd_24h_change != null) {
+        const ch = data.xau.usd_24h_change;
+        changeEl.textContent = fmtPct(ch);
+        changeEl.className = 'coin-change ' + (ch >= 0 ? 'up' : 'down');
+      }
+    }
     setPriceNote('');
+    setPriceStamp(data.meta);
+    const header = document.getElementById('lastUpdate');
+    if (header && data.meta?.fetchedAt) {
+      header.textContent = (data.meta.source === 'binance' ? '实时 ' : '更新于 ') + fmtTime(data.meta.fetchedAt);
+    }
   } catch (e) {
-    console.warn('CoinGecko fetch failed:', e.message);
-    setPriceNote('实时价格暂不可用（CoinGecko 限流），稍后会自动重试');
+    console.warn('Price fetch failed:', e.message);
+    setPriceNote('实时价格暂不可用，稍后会自动重试');
   }
 }
 
@@ -95,11 +127,8 @@ async function fetchGoldPrice() {
     const priceEl = document.getElementById('xauPrice');
     const changeEl = document.getElementById('xauChange');
 
-    if (priceEl && data.spot_usd_oz) {
+    if (priceEl && data.spot_usd_oz && changeEl && changeEl.textContent === '') {
       priceEl.textContent = '$' + Number(data.spot_usd_oz).toLocaleString('en-US', { maximumFractionDigits: 1 });
-    }
-    // Calculate 24h change from open (xaus doesn't provide change directly, use prev close approximation)
-    if (changeEl) {
       changeEl.textContent = '黄金现货';
       changeEl.className = 'coin-change up';
     }
@@ -119,6 +148,36 @@ async function fetchGoldPrice() {
     }
   } catch (e) {
     console.warn('Gold price fetch failed:', e.message);
+  }
+}
+
+function fmtMcap(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '--';
+  if (n >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
+  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+  return fmtUsd(n);
+}
+
+async function fetchOverview() {
+  try {
+    const ov = await fetchJSON('/api/overview');
+    const usdt = ov.usdtDominance;
+    const delta = ov.usdtDelta;
+    const pct = (v) => (Number.isFinite(Number(v)) ? Number(v).toFixed(2) + '%' : '--');
+    const deltaText = Number.isFinite(delta)
+      ? `<span class="coin-change ${delta >= 0 ? 'up' : 'down'}">${delta >= 0 ? '+' : ''}${delta.toFixed(2)}</span>`
+      : '';
+    const hint = ov.inverse?.text || 'USDT.D 与 BTC/ETH 多为反向';
+    document.getElementById('marketStats').innerHTML = `
+      <span class="stat">总市值 ${fmtMcap(ov.totalMcap)}</span>
+      <span class="stat">BTC.D ${pct(ov.btcDominance)}</span>
+      <span class="stat">ETH.D ${pct(ov.ethDominance)}</span>
+      <span class="stat stat-usdt">USDT.D ${pct(usdt)} ${deltaText}</span>
+      <span class="stat stat-hint">${hint}</span>
+    `;
+  } catch (e) {
+    console.warn('Overview fetch failed:', e.message);
   }
 }
 
@@ -276,22 +335,42 @@ async function loadMarketSignals() {
   try {
     const data = await fetchJSON('/api/market-signals');
 
-    const ov = data.overview;
-    document.getElementById('marketStats').innerHTML = `
-      <span class="stat">总市值 ${ov.totalMcap}</span>
-      <span class="stat">BTC Dominance ${ov.btcDominance}</span>
-      <span class="stat">恐惧贪婪指数 ${ov.fearGreed}</span>
-    `;
-
     const sigColors = { amber: 'sig-amber', blue: 'sig-blue', gray: 'sig-gray' };
-    document.getElementById('signalList').innerHTML = data.tradingSignals.map(s => `
+    const signals = data.tradingSignals || [];
+    if (!signals.length) {
+      document.getElementById('signalList').innerHTML = '<div class="empty">等待价格快照后生成点位</div>';
+    } else {
+      document.getElementById('signalList').innerHTML = signals.map(s => {
+        const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
+        const priceLine = s.priceText
+          ? `<div class="signal-levels"><span class="level-label">现价:</span> ${s.priceText}${s.changeText ? ` <span class="${chClass}">${s.changeText}</span>` : ''}</div>`
+          : '';
+        const ema = s.emaStrategy;
+        let emaBox = '';
+        if (ema && !ema.error) {
+          const tagCls = ema.setup === 'long' ? 'long' : ema.setup === 'short' ? 'short' : 'watch';
+          emaBox = `<div class="strategy-box">
+            <div class="strategy-tags">
+              <span class="strategy-tag ${tagCls}">EMA ${ema.setupLabel || '观望'}</span>
+              <span class="strategy-tag">${ema.trendLabel || ''}</span>
+            </div>
+            <div>${ema.note || ''}</div>
+            ${ema.setup === 'long' || ema.setup === 'short'
+              ? `<div>参考止损 ${ema.stopText || '--'} · 止盈 ${ema.tpText || '--'} （2%/4%）</div>`
+              : ''}
+          </div>`;
+        }
+        return `
       <div class="signal-card ${sigColors[s.color] || ''}">
         <div class="signal-coin">${s.coin} <span style="font-size:12px;font-weight:400;color:var(--text-secondary);">· ${s.bias}</span></div>
+        ${priceLine}
         <div class="signal-levels"><span class="level-label">支撑:</span> ${s.support}</div>
         <div class="signal-levels"><span class="level-label">阻力:</span> ${s.resistance}</div>
         <div class="signal-strategy">${s.strategy}</div>
-      </div>
-    `).join('');
+        ${emaBox}
+      </div>`;
+      }).join('');
+    }
 
     document.getElementById('unlockBody').innerHTML = data.tokenUnlocks.map(u => `
       <tr>
@@ -700,10 +779,10 @@ function updateTimestamp() {
 }
 
 async function refreshAll() {
-  updateTimestamp();
   await Promise.all([
     fetchCoinGeckoPrices(),
     fetchGoldPrice(),
+    fetchOverview(),
     loadValuescanData(),
     loadMarketSignals(),
     loadOwnSignals(),
@@ -718,8 +797,9 @@ document.getElementById('refreshBtn').addEventListener('click', () => {
 });
 
 refreshAll();
-setInterval(fetchCoinGeckoPrices, 60000);
+setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
+setInterval(fetchOverview, 60000);
 setInterval(loadValuescanData, 180000);
 setInterval(() => loadOwnSignals(), 300000); // 信号引擎每5分钟刷新
 setInterval(() => loadReversalSignals(), 300000); // 反转信号每5分钟刷新
