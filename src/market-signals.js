@@ -189,6 +189,41 @@ function classifyBias(major) {
   return { bias: '偏空观望', color: 'gray', kind: 'weak' };
 }
 
+function rsiPhrase(rsi) {
+  if (!Number.isFinite(rsi)) return 'RSI 数据不足';
+  if (rsi >= 70) return `RSI6 在 ${rsi.toFixed(0)}，短线超买，不宜追多`;
+  if (rsi >= 65) return `RSI6 在 ${rsi.toFixed(0)}，接近超买，多单要等回踩`;
+  if (rsi <= 30) return `RSI6 在 ${rsi.toFixed(0)}，短线超卖，不宜追空`;
+  if (rsi <= 35) return `RSI6 在 ${rsi.toFixed(0)}，动能偏低，空单需谨慎`;
+  return `RSI6 在 ${rsi.toFixed(0)}，未到极端区`;
+}
+
+function buildTfAnalysis(tfLabel, ema, s1, r1) {
+  if (!ema) {
+    return `${tfLabel}K 线还没到位。先按现价观察，支撑看 ${s1}，阻力看 ${r1}，不要追单。`;
+  }
+  const ls = ema.lastSignal;
+  let cross = '未见有效的 EMA7 穿越 EMA56。';
+  if (ls) {
+    cross = ls.held
+      ? `EMA7 相对 EMA56 处于「${ls.label}」状态（${ls.timeAgoText}），价格仍在分界线${ls.dir === 'up' ? '上方' : '下方'}。`
+      : `最近一次信号是 ${ls.label}，发生在${ls.timeAgoText}，当时价 ${ls.priceText}。`;
+  }
+  const macd = ema.macdAboveZero
+    ? 'MACD 在 0 轴上方，多头动能还在。'
+    : 'MACD 在 0 轴下方，空头动能占优。';
+  const align = ema.trendLabel || '均线纠缠';
+  let action;
+  if (ema.setup === 'long') {
+    action = `开仓过滤已满足，可在 ${s1} 一带轻仓试多，止损参考 ${ema.stopText}，第一目标 ${r1}，延伸目标 ${ema.tpText}。`;
+  } else if (ema.setup === 'short') {
+    action = `开仓过滤已满足，反弹 ${r1} 遇阻可轻仓试空，止损参考 ${ema.stopText}，目标看 ${s1} / ${ema.tpText}。`;
+  } else {
+    action = `穿越、MACD 同向、RSI 不极端尚未同时成立，这个周期先观望：多等回踩 ${s1}，空等反抽 ${r1}。`;
+  }
+  return `${tfLabel}目前是${align}。${cross}${macd}${rsiPhrase(ema.rsi6)}。${action}`;
+}
+
 function buildStrategy(kind, price, supports, resistances) {
   const s1 = fmtPx(supports[0], price);
   const s2 = fmtPx(supports[1] ?? supports[0] * 0.985, price);
@@ -223,6 +258,8 @@ function buildCard(major) {
   if (!supports.length || !resistances.length) return null;
   const { bias, color, kind } = classifyBias(major);
   const change24h = num(major.change24h);
+  const s1 = fmtPx(supports[0], price);
+  const r1 = fmtPx(resistances[0], price);
   return {
     coin: major.coin,
     bias,
@@ -230,11 +267,14 @@ function buildCard(major) {
     support: joinLevels(supports, price),
     resistance: joinLevels(resistances, price),
     strategy: buildStrategy(kind, price, supports, resistances),
+    analysis15m: buildTfAnalysis('15 分钟', major.ema15, s1, r1),
+    analysis1h: buildTfAnalysis('1 小时', major.ema1h, s1, r1),
     price,
     change24h,
     priceText: fmtSpot(price),
     changeText: fmtCh(change24h),
-    emaStrategy: major.emaStrategy || null,
+    ema15: major.ema15 || null,
+    ema1h: major.ema1h || major.emaStrategy || null,
   };
 }
 
@@ -350,8 +390,14 @@ export function assembleMarketSignals({ majors = {}, prices = {}, gold = null, s
       'XAU/USD',
     ),
   };
+  const board15 = strategies['15m'] && typeof strategies['15m'] === 'object' ? strategies['15m'] : {};
+  const board1h = strategies['1h'] && typeof strategies['1h'] === 'object'
+    ? strategies['1h']
+    : strategies;
   for (const key of CARD_ORDER) {
-    if (merged[key] && strategies[key]) merged[key].emaStrategy = strategies[key];
+    if (!merged[key]) continue;
+    merged[key].ema15 = board15[key] || null;
+    merged[key].ema1h = board1h[key] || null;
   }
 
   const tradingSignals = CARD_ORDER

@@ -1,282 +1,107 @@
 /**
- * EMA7/21 × EMA56 趋势跟随（用户 Pine 策略）
- * 15m / 1h：EMA56 为多空分界，EMA7 穿越 56 为信号，MACD 0 轴 + RSI6 过滤
+ * K 线拉取（扫描脚本 / Worker 兜底）
  */
+import { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy } from '../public/ema-core.js';
 
-export const STRATEGY_SYMBOLS = {
-  BTC: 'BTCUSDT',
-  ETH: 'ETHUSDT',
-  BNB: 'BNBUSDT',
-  SOL: 'SOLUSDT',
-  XAU: 'XAUUSDT',
+export { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy };
+
+const CG_IDS = {
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+  BNB: 'binancecoin',
+  SOL: 'solana',
+  XAU: 'pax-gold',
 };
-
-const RSI_PERIOD = 6;
-const RSI_MAX = 65;
-const RSI_MIN = 30;
-const STOP_PCT = 2;
-const TAKE_PCT = 4;
-const FAPI_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
 const CG = 'https://api.coingecko.com/api/v3';
-
+const KLINE_LIMIT = 120;
+const SYMBOL_ALIASES = {
+  XAUUSDT: ['XAUUSDT', 'PAXGUSDT'],
+};
+const KLINE_URLS = [
+  (s, i, n) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${i}&limit=${n}`,
+  (s, i, n) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${i}&limit=${n}`,
+  (s, i, n) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${i}&limit=${n}`,
+];
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; CryptoDashboard/1.0)',
   Accept: 'application/json',
 };
-
 const INTERVAL_MS = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
-const SETUP_LOOKBACK = { '15m': 16, '1h': 12 };
 
-function calcEMA(closes, period) {
-  if (!closes || closes.length < period) return null;
-  const k = 2 / (period + 1);
-  let ema = 0;
-  for (let i = 0; i < period; i++) ema += closes[i];
-  ema /= period;
-  const out = new Array(period - 1).fill(null);
-  out.push(ema);
-  for (let i = period; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-    out.push(ema);
-  }
-  return out;
-}
-
-function calcRMA(values, period) {
-  if (!values || values.length < period) return null;
-  const out = new Array(values.length).fill(null);
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += values[i];
-  let rma = sum / period;
-  out[period - 1] = rma;
-  for (let i = period; i < values.length; i++) {
-    rma = (rma * (period - 1) + values[i]) / period;
-    out[i] = rma;
-  }
-  return out;
-}
-
-function calcRSI(closes, period = RSI_PERIOD) {
-  if (!closes || closes.length < period + 2) return null;
-  const gains = [];
-  const losses = [];
-  for (let i = 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    gains.push(Math.max(d, 0));
-    losses.push(Math.max(-d, 0));
-  }
-  const avgG = calcRMA(gains, period);
-  const avgL = calcRMA(losses, period);
-  if (!avgG || !avgL) return null;
-  const rsi = new Array(closes.length).fill(null);
-  for (let i = 0; i < avgG.length; i++) {
-    const g = avgG[i];
-    const l = avgL[i];
-    if (g == null || l == null) continue;
-    const rs = l === 0 ? 100 : g / l;
-    rsi[i + 1] = 100 - 100 / (1 + rs);
-  }
-  return rsi;
-}
-
-function crossedUp(a, b, i) {
-  return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null
-    && a[i - 1] <= b[i - 1] && a[i] > b[i];
-}
-
-function crossedDown(a, b, i) {
-  return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null
-    && a[i - 1] >= b[i - 1] && a[i] < b[i];
-}
-
-function findLastCross(fast, slow, from) {
-  for (let i = from; i >= 1; i--) {
-    if (crossedUp(fast, slow, i)) return { dir: 'up', index: i };
-    if (crossedDown(fast, slow, i)) return { dir: 'down', index: i };
-  }
-  return null;
-}
-
-function formatAgo(barsAgo, interval) {
-  if (barsAgo == null) return '--';
-  if (barsAgo === 0) return '当前K线';
-  const minutes = interval === '15m' ? barsAgo * 15 : barsAgo * 60;
-  if (minutes < 60) return `${minutes} 分钟前（${barsAgo}根${interval}）`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  if (hours < 48) {
-    return rest
-      ? `${hours}小时${rest}分前（${barsAgo}根${interval}）`
-      : `${hours} 小时前（${barsAgo}根${interval}）`;
-  }
-  const days = Math.floor(hours / 24);
-  return `${days} 天前（${barsAgo}根${interval}）`;
-}
-
-function fmtUsd(n, price) {
-  if (!Number.isFinite(n)) return '--';
-  if (price >= 1000) return '$' + Math.round(n).toLocaleString('en-US');
-  if (price >= 100) return '$' + n.toFixed(0);
-  if (price >= 1) return '$' + n.toFixed(2);
-  return '$' + n.toFixed(4);
-}
-
-function fmtPctVal(n) {
-  if (!Number.isFinite(n)) return '--';
-  return n.toFixed(2) + '%';
-}
-
-function macdStrongThreshold(close) {
-  return Math.max(Math.abs(close) * 0.00005, 1e-8);
-}
-
-export function evaluateEmaTrendStrategy(klines, coin = '', opts = {}) {
-  const interval = opts.interval || '1h';
-  const valueKind = opts.valueKind || 'usd';
-  const inverse = !!opts.inverse;
-  const fmtVal = (n, ref) => (valueKind === 'pct' ? fmtPctVal(n) : fmtUsd(n, ref));
-
-  const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
-  const times = (klines || []).map((k) => (Array.isArray(k) ? Number(k[0]) : Number(k.t || 0)));
-  if (closes.length < 80) return null;
-
-  const ema7 = calcEMA(closes, 7);
-  const ema21 = calcEMA(closes, 21);
-  const ema56 = calcEMA(closes, 56);
-  const rsi = calcRSI(closes, RSI_PERIOD);
-  const ema12 = calcEMA(closes, 12);
-  const ema26 = calcEMA(closes, 26);
-  if (!ema7 || !ema21 || !ema56 || !ema12 || !ema26 || !rsi) return null;
-
-  const dif = ema12.map((v, i) => (v == null || ema26[i] == null ? null : v - ema26[i]));
-  const firstDif = dif.findIndex((v) => v != null);
-  const difCompact = firstDif >= 0 ? dif.slice(firstDif) : [];
-  const deaCompact = calcEMA(difCompact, 9);
-  const deaAligned = new Array(dif.length).fill(null);
-  if (deaCompact && firstDif >= 0) {
-    for (let j = 0; j < deaCompact.length; j++) deaAligned[firstDif + j] = deaCompact[j];
-  }
-
-  const i = closes.length - 1;
-  const close = closes[i];
-  const d7 = ema7[i];
-  const d21 = ema21[i];
-  const d56 = ema56[i];
-  const difNow = dif[i];
-  const deaNow = deaAligned[i];
-  const rsiNow = rsi[i];
-  if ([close, d7, d21, d56, difNow, rsiNow].some((v) => v == null)) return null;
-
-  const macdDiff = Math.abs(difNow - (deaNow ?? 0));
-  const macdAboveZero = difNow > 0;
-  const macdBelowZero = difNow < 0;
-  const strongLong = macdDiff > macdStrongThreshold(close) && difNow > (deaNow ?? 0);
-  const strongShort = macdDiff > macdStrongThreshold(close) && difNow < (deaNow ?? 0);
-  const emaAllAbove = d7 > d56 && d21 > d56;
-  const emaAllBelow = d7 < d56 && d21 < d56;
-
-  const last = findLastCross(ema7, ema56, i);
-  const lastSignal = last ? {
-    dir: last.dir,
-    label: last.dir === 'up' ? '上穿56' : '下穿56',
-    barsAgo: i - last.index,
-    timeAgoText: formatAgo(i - last.index, interval),
-    time: times[last.index] || null,
-    price: closes[last.index],
-    priceText: fmtVal(closes[last.index], close),
-    held: false,
-  } : {
-    dir: d7 > d56 ? 'up' : 'down',
-    label: d7 > d56 ? '上穿后维持' : '下穿后维持',
-    barsAgo: null,
-    timeAgoText: `近${closes.length}根内未再交叉`,
-    time: null,
-    price: close,
-    priceText: fmtVal(close, close),
-    held: true,
-  };
-
-  const lookback = SETUP_LOOKBACK[interval] || 12;
-  const recentUp = lastSignal && lastSignal.dir === 'up' && lastSignal.barsAgo <= lookback;
-  const recentDown = lastSignal && lastSignal.dir === 'down' && lastSignal.barsAgo <= lookback;
-  const longSetup = recentUp && close > d56 && macdAboveZero && (strongLong || rsiNow < RSI_MAX);
-  const shortSetup = recentDown && close < d56 && macdBelowZero && (strongShort || rsiNow > RSI_MIN);
-
-  let setup = 'watch';
-  let setupLabel = '观望';
-  if (longSetup && !shortSetup) {
-    setup = 'long';
-    setupLabel = lastSignal.barsAgo === 0 ? '做多' : `做多（${lastSignal.timeAgoText}上穿）`;
-  } else if (shortSetup && !longSetup) {
-    setup = 'short';
-    setupLabel = lastSignal.barsAgo === 0 ? '做空' : `做空（${lastSignal.timeAgoText}下穿）`;
-  }
-
-  let trend = 'mixed';
-  let trendLabel = '均线纠缠';
-  if (emaAllAbove) {
-    trend = 'long';
-    trendLabel = '多头排列 7/21>56';
-  } else if (emaAllBelow) {
-    trend = 'short';
-    trendLabel = '空头排列 7/21<56';
-  }
-
-  const stopLoss = setup === 'short' ? close * (1 + STOP_PCT / 100) : close * (1 - STOP_PCT / 100);
-  const takeProfit = setup === 'short' ? close * (1 - TAKE_PCT / 100) : close * (1 + TAKE_PCT / 100);
-
-  let cryptoBias = null;
-  let cryptoBiasLabel = null;
-  if (inverse && lastSignal) {
-    if (lastSignal.dir === 'up') {
-      cryptoBias = 'risk-off';
-      cryptoBiasLabel = 'USDT.D 上穿 · 对 BTC/ETH 偏空';
-    } else {
-      cryptoBias = 'risk-on';
-      cryptoBiasLabel = 'USDT.D 下穿 · 对 BTC/ETH 偏多';
+export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT) {
+  const symbols = SYMBOL_ALIASES[symbol] || [symbol];
+  let lastErr = null;
+  for (const sym of symbols) {
+    for (const makeUrl of KLINE_URLS) {
+      const url = makeUrl(sym, interval, limit);
+      try {
+        const res = await fetch(url, { headers: FETCH_HEADERS });
+        if (!res.ok) {
+          lastErr = new Error(`klines ${sym} ${res.status}`);
+          continue;
+        }
+        const data = await res.json();
+        if (Array.isArray(data) && data.length >= 80) return data;
+        lastErr = new Error(`klines ${sym} short ${Array.isArray(data) ? data.length : 0}`);
+      } catch (e) {
+        lastErr = e;
+      }
     }
   }
-
-  return {
-    coin,
-    interval,
-    price: close,
-    priceText: fmtVal(close, close),
-    ema7: d7,
-    ema21: d21,
-    ema56: d56,
-    rsi6: rsiNow,
-    macdDif: difNow,
-    macdDea: deaNow,
-    macdAboveZero,
-    trend,
-    trendLabel,
-    setup,
-    setupLabel,
-    lastSignal,
-    filters: {
-      macdZero: macdAboveZero,
-      rsi6: rsiNow,
-      rsiOkLong: rsiNow < RSI_MAX,
-      rsiOkShort: rsiNow > RSI_MIN,
-      macdStrong: strongLong || strongShort,
-    },
-    stopLoss,
-    takeProfit,
-    stopText: fmtVal(stopLoss, close),
-    tpText: fmtVal(takeProfit, close),
-    inverse,
-    cryptoBias,
-    cryptoBiasLabel,
-    approx: !!opts.approx,
-  };
+  throw lastErr || new Error(`klines ${symbol} failed`);
 }
 
-export async function fetchKlines(symbol, interval = '1h', limit = 200) {
-  const url = `${FAPI_KLINES}?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const res = await fetch(url, { headers: FETCH_HEADERS });
-  if (!res.ok) throw new Error(`klines ${symbol} ${res.status}`);
-  return res.json();
+async function fetchCgKlines(coin, interval) {
+  const id = CG_IDS[coin];
+  if (!id) throw new Error(`no cg id for ${coin}`);
+  const days = interval === '15m' ? 1 : 7;
+  const data = await fetchCgChart(id, days);
+  const sampled = resampleLast(data.prices || [], INTERVAL_MS[interval] || INTERVAL_MS['1h']);
+  if (sampled.length < 80) throw new Error(`cg ${coin} ${interval} short ${sampled.length}`);
+  return sampled.map(([t, p]) => [t, p, p, p, p, 0]);
+}
+
+export function normalizeBoard(raw) {
+  const empty = { '15m': {}, '1h': {}, usdtD: { '15m': null, '1h': null } };
+  if (!raw || typeof raw !== 'object') return empty;
+  if (raw['15m'] || raw['1h'] || raw.usdtD) {
+    return {
+      '15m': raw['15m'] && typeof raw['15m'] === 'object' ? raw['15m'] : {},
+      '1h': raw['1h'] && typeof raw['1h'] === 'object' ? raw['1h'] : {},
+      usdtD: raw.usdtD && typeof raw.usdtD === 'object' ? raw.usdtD : empty.usdtD,
+      errors: raw.errors || [],
+    };
+  }
+  const h1 = {};
+  for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+    if (raw[coin] && raw[coin].lastSignal) h1[coin] = raw[coin];
+  }
+  return { '15m': {}, '1h': h1, usdtD: empty.usdtD, errors: [] };
+}
+
+export function boardHasRows(board) {
+  const b = normalizeBoard(board);
+  for (const tf of ['15m', '1h']) {
+    for (const row of Object.values(b[tf] || {})) {
+      if (row && row.lastSignal) return true;
+    }
+  }
+  if (b.usdtD?.['1h']?.lastSignal || b.usdtD?.['15m']?.lastSignal) return true;
+  return false;
+}
+
+function mergeBoards(live, cached) {
+  const a = normalizeBoard(live);
+  const b = normalizeBoard(cached);
+  const out = { '15m': { ...b['15m'] }, '1h': { ...b['1h'] }, usdtD: { ...b.usdtD }, errors: a.errors || [] };
+  for (const tf of ['15m', '1h']) {
+    for (const [coin, row] of Object.entries(a[tf] || {})) {
+      if (row && row.lastSignal) out[tf][coin] = row;
+    }
+  }
+  if (a.usdtD?.['1h']?.lastSignal) out.usdtD['1h'] = a.usdtD['1h'];
+  if (a.usdtD?.['15m']?.lastSignal) out.usdtD['15m'] = a.usdtD['15m'];
+  return out;
 }
 
 async function fetchCgChart(id, days) {
@@ -352,24 +177,38 @@ export async function fetchUsdtDStrategies(liveUsdtD = null) {
   return out;
 }
 
-export async function fetchStrategyBoard(liveUsdtD = null) {
-  const board = { '15m': {}, '1h': {}, usdtD: { '15m': null, '1h': null } };
+export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
+  const includeUsdtD = opts.includeUsdtD !== false;
+  const intervals = opts.intervals || ['15m', '1h'];
+  const board = { '15m': {}, '1h': {}, usdtD: { '15m': null, '1h': null }, errors: [] };
   const jobs = [];
-  for (const interval of ['15m', '1h']) {
+  for (const interval of intervals) {
     for (const [coin, symbol] of Object.entries(STRATEGY_SYMBOLS)) {
       jobs.push((async () => {
         try {
-          const klines = await fetchKlines(symbol, interval, 200);
-          board[interval][coin] = evaluateEmaTrendStrategy(klines, coin, { interval });
-        } catch {
+          let klines;
+          try {
+            klines = await fetchKlines(symbol, interval, KLINE_LIMIT);
+          } catch {
+            klines = await fetchCgKlines(coin, interval);
+          }
+          const row = evaluateEmaTrendStrategy(klines, coin, { interval });
+          board[interval][coin] = row;
+          if (!row) board.errors.push(`${coin} ${interval}: 指标不足`);
+        } catch (e) {
           board[interval][coin] = null;
+          board.errors.push(`${coin} ${interval}: ${e.message || e}`);
         }
       })());
     }
   }
-  jobs.push((async () => {
-    board.usdtD = await fetchUsdtDStrategies(liveUsdtD);
-  })());
+  if (includeUsdtD) {
+    jobs.push((async () => {
+      board.usdtD = await fetchUsdtDStrategies(liveUsdtD);
+    })());
+  }
   await Promise.all(jobs);
   return board;
 }
+
+export { mergeBoards };

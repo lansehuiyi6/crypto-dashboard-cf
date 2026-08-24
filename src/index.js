@@ -1,7 +1,7 @@
 import { SignalStore, getStore } from './store.js';
 import { assembleMarketSignals } from './market-signals.js';
 import { fetchBinancePrices, fetchGlobalOverview, inverseHint } from './live-market.js';
-import { fetchStrategyBoard } from './ema-strategy.js';
+import { fetchStrategyBoard, normalizeBoard, boardHasRows, mergeBoards } from './ema-strategy.js';
 
 export { SignalStore };
 
@@ -238,15 +238,34 @@ async function handleApi(request, env, ctx) {
 
   if (pathname === '/api/ema-strategy') {
     const snap = await readSnapshot(env);
+    const cached = normalizeBoard(snap.strategies?.data);
     const usdtD = snap.global?.data?.usdtDominance;
     try {
-      const board = await fetchStrategyBoard(usdtD);
-      return json({ ...board, source: 'live', fetchedAt: Date.now() });
-    } catch {
-      const cached = snap.strategies?.data;
-      if (cached) return json({ ...cached, source: 'snapshot', fetchedAt: snap.strategies.timestamp });
-      return json({ error: 'strategy unavailable' }, 502);
+      const live = await fetchStrategyBoard(usdtD, { includeUsdtD: false, intervals: ['15m', '1h'] });
+      const merged = mergeBoards(live, cached);
+      if (boardHasRows(merged)) {
+        return json({
+          ...merged,
+          source: boardHasRows(live) ? 'live' : 'snapshot',
+          fetchedAt: Date.now(),
+        });
+      }
+    } catch (e) {
+      console.warn('[ema-strategy] live failed', e.message);
     }
+    if (boardHasRows(cached)) {
+      return json({
+        ...cached,
+        source: 'snapshot',
+        fetchedAt: snap.strategies?.timestamp || Date.now(),
+      });
+    }
+    return json({
+      ...cached,
+      source: 'empty',
+      fetchedAt: Date.now(),
+      errors: cached.errors || ['币安 K 线暂不可用，等待扫描写入'],
+    });
   }
 
   if (pathname === '/api/market-signals') {
@@ -258,12 +277,11 @@ async function handleApi(request, env, ctx) {
       if (live.bitcoin) prices = { ...prices, ...live };
     } catch { /* keep snapshot prices */ }
     const board = snap.strategies?.data || {};
-    const strategies = board['1h'] || board;
     return json(assembleMarketSignals({
       majors: snap.majors?.data || {},
       prices,
       gold,
-      strategies,
+      strategies: board,
     }));
   }
 

@@ -1,4 +1,5 @@
-'use strict';
+import { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy } from './ema-core.js';
+
 
 const COINGECKO_IDS = {
   bitcoin:     { el: 'btc',  name: 'BTC' },
@@ -78,11 +79,83 @@ function setPriceStamp(meta, extra = '') {
 
 let lastBtcChange = null;
 
+async function fetchBinancePricesClient() {
+  const spot = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'];
+  const map = {
+    BTCUSDT: 'bitcoin', ETHUSDT: 'ethereum', BNBUSDT: 'binancecoin',
+    SOLUSDT: 'solana', XRPUSDT: 'ripple', DOGEUSDT: 'dogecoin',
+  };
+  const [list, xau] = await Promise.all([
+    fetch('https://api.binance.com/api/v3/ticker/24hr?symbols=' + encodeURIComponent(JSON.stringify(spot))).then((r) => {
+      if (!r.ok) throw new Error('ticker ' + r.status);
+      return r.json();
+    }),
+    fetch('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=XAUUSDT').then((r) => r.ok ? r.json() : null).catch(() => null),
+  ]);
+  const out = {};
+  for (const row of list || []) {
+    const id = map[row.symbol];
+    if (id) out[id] = { usd: Number(row.lastPrice), usd_24h_change: Number(row.priceChangePercent) };
+  }
+  if (xau && xau.lastPrice) {
+    out.xau = { usd: Number(xau.lastPrice), usd_24h_change: Number(xau.priceChangePercent) };
+  }
+  if (!out.bitcoin) throw new Error('binance ticker empty');
+  out.meta = { source: 'binance', fetchedAt: Date.now() };
+  return out;
+}
+
+async function fetchKlinesClient(symbol, interval) {
+  const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
+  const hosts = [
+    (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${interval}&limit=120`,
+    (s) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${interval}&limit=120`,
+    (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${interval}&limit=120`,
+  ];
+  for (const sym of aliases) {
+    for (const make of hosts) {
+      try {
+        const res = await fetch(make(sym));
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (Array.isArray(data) && data.length >= 80) return data;
+      } catch { /* next host */ }
+    }
+  }
+  throw new Error('klines ' + symbol);
+}
+
+async function fetchBoardInBrowser() {
+  const board = { '15m': {}, '1h': {}, usdtD: {}, source: 'browser', fetchedAt: Date.now(), errors: [] };
+  await Promise.all(['15m', '1h'].flatMap((interval) =>
+    Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
+      try {
+        const klines = await fetchKlinesClient(symbol, interval);
+        board[interval][coin] = evaluateEmaTrendStrategy(klines, coin, { interval });
+        if (!board[interval][coin]) board.errors.push(coin + ' ' + interval + ': 指标不足');
+      } catch (e) {
+        board[interval][coin] = null;
+        board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+      }
+    }),
+  ));
+  return board;
+}
+
+function boardHasClientRows(board) {
+  if (!board) return false;
+  return ['15m', '1h'].some((tf) => Object.values(board[tf] || {}).some((row) => row && row.lastSignal));
+}
+
 async function fetchCoinGeckoPrices() {
   try {
-    const ids = Object.keys(COINGECKO_IDS).join(',');
-    const url = `/api/coingecko/prices?ids=${ids}`;
-    const data = await fetchJSON(url);
+    let data;
+    try {
+      data = await fetchBinancePricesClient();
+    } catch {
+      const ids = Object.keys(COINGECKO_IDS).join(',');
+      data = await fetchJSON(`/api/coingecko/prices?ids=${ids}`);
+    }
     if (data.status?.error_code || data.error || !data.bitcoin) {
       throw new Error(data.status?.error_message || data.error || '价格数据为空');
     }
@@ -195,17 +268,29 @@ function renderUsdtDBox(usdtD) {
 
 async function loadEmaStrategy() {
   const body = document.getElementById('emaTableBody');
+  const note = document.getElementById('emaBoardNote');
   try {
-    const data = await fetchJSON('/api/ema-strategy');
+    let data;
+    try {
+      data = await fetchBoardInBrowser();
+      if (!boardHasClientRows(data)) throw new Error('browser klines empty');
+    } catch (e) {
+      console.warn('browser klines fallback to worker', e.message);
+      data = await fetchJSON('/api/ema-strategy');
+    }
+    lastEmaBoard = data;
+    renderShortSignalCards();
     const coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
     const html = [];
+    let filled = 0;
     for (const coin of coins) {
       for (const tf of ['15m', '1h']) {
         const row = data[tf] && data[tf][coin];
-        if (!row) {
-          html.push(`<tr><td>${coin}</td><td><span class="ema-tf">${tf}</span></td><td colspan="5" class="empty">该周期暂无数据</td></tr>`);
+        if (!row || !row.lastSignal) {
+          html.push(`<tr><td>${coin}</td><td><span class="ema-tf">${tf}</span></td><td colspan="5" class="empty">K线未返回</td></tr>`);
           continue;
         }
+        filled += 1;
         const ls = row.lastSignal;
         html.push(`<tr>
           <td>${coin}</td>
@@ -220,9 +305,23 @@ async function loadEmaStrategy() {
     }
     if (body) body.innerHTML = html.join('');
     renderUsdtDBox(data.usdtD);
+    const src = data.source === 'browser' ? '浏览器直连币安'
+      : data.source === 'live' ? 'Worker 拉取'
+      : data.source === 'snapshot' ? '扫描快照'
+      : '无K线';
+    const when = data.fetchedAt ? fmtTime(data.fetchedAt) : '';
+    const err = Array.isArray(data.errors) && data.errors.length
+      ? data.errors.slice(0, 3).join('；')
+      : '';
+    if (note) {
+      note.textContent = filled
+        ? `${src} ${when}`
+        : `K线拉取失败${err ? '：' + err : '。Worker 访问币安被拦时，等 GitHub Actions 扫描写入后再刷新。'}`;
+    }
   } catch (e) {
     console.warn('EMA strategy fetch failed:', e.message);
-    if (body) body.innerHTML = '<tr><td colspan="7" class="empty">EMA 策略获取失败，稍后重试</td></tr>';
+    if (body) body.innerHTML = '<tr><td colspan="7" class="empty">EMA 策略接口失败，稍后重试</td></tr>';
+    if (note) note.textContent = e.message || 'fetch failed';
   }
 }
 
@@ -398,48 +497,105 @@ async function loadValuescanData() {
   document.getElementById('alertCount').textContent = alertItems ? alertItems.length : '--';
 }
 
+let lastShortSignals = [];
+let lastEmaBoard = null;
+
+function stratKeyFromCoin(coin) {
+  if (!coin) return '';
+  if (String(coin).indexOf('XAU') === 0) return 'XAU';
+  return coin;
+}
+
+function clientEssay(tfLabel, ema, s1, r1) {
+  if (!ema) return `${tfLabel}K 线还没到位。先按现价观察，支撑看 ${s1 || '--'}，阻力看 ${r1 || '--'}，不要追单。`;
+  const ls = ema.lastSignal;
+  let cross = '未见有效的 EMA7 穿越 EMA56。';
+  if (ls) {
+    cross = ls.held
+      ? `EMA7 相对 EMA56 处于「${ls.label}」（${ls.timeAgoText}），价格仍在分界线${ls.dir === 'up' ? '上方' : '下方'}。`
+      : `最近一次信号是 ${ls.label}，发生在${ls.timeAgoText}，当时价 ${ls.priceText}。`;
+  }
+  const macd = ema.macdAboveZero ? 'MACD 在 0 轴上方，多头动能还在。' : 'MACD 在 0 轴下方，空头动能占优。';
+  let rsi = 'RSI 数据不足';
+  if (Number.isFinite(Number(ema.rsi6))) {
+    const v = Number(ema.rsi6);
+    if (v >= 70) rsi = `RSI6 在 ${v.toFixed(0)}，短线超买，不宜追多`;
+    else if (v >= 65) rsi = `RSI6 在 ${v.toFixed(0)}，接近超买，多单要等回踩`;
+    else if (v <= 30) rsi = `RSI6 在 ${v.toFixed(0)}，短线超卖，不宜追空`;
+    else if (v <= 35) rsi = `RSI6 在 ${v.toFixed(0)}，动能偏低，空单需谨慎`;
+    else rsi = `RSI6 在 ${v.toFixed(0)}，未到极端区`;
+  }
+  const align = ema.trendLabel || '均线纠缠';
+  let action;
+  if (ema.setup === 'long') {
+    action = `开仓过滤已满足，可在 ${s1} 一带轻仓试多，止损参考 ${ema.stopText}，第一目标 ${r1}，延伸 ${ema.tpText}。`;
+  } else if (ema.setup === 'short') {
+    action = `开仓过滤已满足，反弹 ${r1} 遇阻可轻仓试空，止损参考 ${ema.stopText}，目标看 ${s1} / ${ema.tpText}。`;
+  } else {
+    action = `穿越、MACD 同向、RSI 不极端尚未同时成立，这个周期先观望：多等回踩 ${s1}，空等反抽 ${r1}。`;
+  }
+  return `${tfLabel}目前是${align}。${cross}${macd}${rsi}。${action}`;
+}
+
+function renderShortSignalCards() {
+  const box = document.getElementById('signalList');
+  if (!box) return;
+  const signals = lastShortSignals;
+  if (!signals.length) {
+    box.innerHTML = '<div class="empty">等待价格快照后生成点位</div>';
+    return;
+  }
+  const sigColors = { amber: 'sig-amber', blue: 'sig-blue', gray: 'sig-gray' };
+  box.innerHTML = signals.map(s => {
+    const k = stratKeyFromCoin(s.coin);
+    const e15 = (lastEmaBoard && lastEmaBoard['15m'] && lastEmaBoard['15m'][k]) || s.ema15;
+    const e1h = (lastEmaBoard && lastEmaBoard['1h'] && lastEmaBoard['1h'][k]) || s.ema1h;
+    const s1 = (s.support || '').split(' -> ')[0];
+    const r1 = (s.resistance || '').split(' -> ')[0];
+    const a15 = clientEssay('15 分钟', e15, s1, r1);
+    const a1h = clientEssay('1 小时', e1h, s1, r1);
+    const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
+    const ls15 = e15 && e15.lastSignal;
+    const ls1h = e1h && e1h.lastSignal;
+    return `
+      <div class="signal-card ${sigColors[s.color] || ''}">
+        <div class="sc-top">
+          <div>
+            <div class="sc-name">${s.coin}</div>
+            <div class="sc-bias">${s.bias || ''}</div>
+          </div>
+          <div class="sc-px">
+            <div class="sc-price">${s.priceText || '--'}</div>
+            <div class="sc-chg ${chClass}">${s.changeText || ''}</div>
+          </div>
+        </div>
+        <div class="sc-sr">
+          <div class="sc-sr-item"><span>支撑</span>${s.support || '--'}</div>
+          <div class="sc-sr-item"><span>阻力</span>${s.resistance || '--'}</div>
+        </div>
+        <div class="sc-play">
+          <div class="sc-kicker">操作要点</div>
+          ${s.strategy || ''}
+        </div>
+        <div class="sc-tf-grid">
+          <div class="sc-tf">
+            <div class="sc-tf-h"><span class="ema-tf">15m</span>${emaCrossHtml(ls15)}</div>
+            <p>${a15}</p>
+          </div>
+          <div class="sc-tf">
+            <div class="sc-tf-h"><span class="ema-tf">1h</span>${emaCrossHtml(ls1h)}</div>
+            <p>${a1h}</p>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
 async function loadMarketSignals() {
   try {
     const data = await fetchJSON('/api/market-signals');
-
-    const sigColors = { amber: 'sig-amber', blue: 'sig-blue', gray: 'sig-gray' };
-    const signals = data.tradingSignals || [];
-    if (!signals.length) {
-      document.getElementById('signalList').innerHTML = '<div class="empty">等待价格快照后生成点位</div>';
-    } else {
-      document.getElementById('signalList').innerHTML = signals.map(s => {
-        const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
-        const priceLine = s.priceText
-          ? `<div class="signal-levels"><span class="level-label">现价:</span> ${s.priceText}${s.changeText ? ` <span class="${chClass}">${s.changeText}</span>` : ''}</div>`
-          : '';
-        const ema = s.emaStrategy;
-        let emaBox = '';
-        if (ema && !ema.error) {
-          const tagCls = ema.setup === 'long' ? 'long' : ema.setup === 'short' ? 'short' : 'watch';
-          emaBox = `<div class="strategy-box">
-            <div class="strategy-tags">
-              <span class="strategy-tag ${tagCls}">EMA ${ema.setupLabel || '观望'}</span>
-              <span class="strategy-tag">${ema.trendLabel || ''}</span>
-            </div>
-            ${ema.lastSignal
-              ? `<div>最近信号：<strong>${ema.lastSignal.label}</strong> · ${ema.lastSignal.timeAgoText} · ${ema.lastSignal.priceText}</div>`
-              : '<div>最近信号：尚无 EMA7/56 穿越</div>'}
-            ${ema.setup === 'long' || ema.setup === 'short'
-              ? `<div>参考止损 ${ema.stopText || '--'} · 止盈 ${ema.tpText || '--'} （2%/4%）</div>`
-              : ''}
-          </div>`;
-        }
-        return `
-      <div class="signal-card ${sigColors[s.color] || ''}">
-        <div class="signal-coin">${s.coin} <span style="font-size:12px;font-weight:400;color:var(--text-secondary);">· ${s.bias}</span></div>
-        ${priceLine}
-        <div class="signal-levels"><span class="level-label">支撑:</span> ${s.support}</div>
-        <div class="signal-levels"><span class="level-label">阻力:</span> ${s.resistance}</div>
-        <div class="signal-strategy">${s.strategy}</div>
-        ${emaBox}
-      </div>`;
-      }).join('');
-    }
+    lastShortSignals = data.tradingSignals || [];
+    renderShortSignalCards();
 
     document.getElementById('unlockBody').innerHTML = data.tokenUnlocks.map(u => `
       <tr>
