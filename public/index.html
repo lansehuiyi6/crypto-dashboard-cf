@@ -35,6 +35,34 @@
 
     <div class="gold-bar" id="goldBar"></div>
 
+    <section class="ema-board" id="emaBoard">
+      <div class="ema-board-header">
+        <h2>EMA7/21/56 策略 <span class="ema-badge">15m / 1h</span></h2>
+        <div class="ema-board-desc">
+          EMA56 为多空分界，EMA7 穿越 56 为信号；MACD 在 0 轴同向、RSI6 不极端才开仓。下表给出<strong>最近一次上穿/下穿</strong>，以及当前是否满足做多/做空。
+        </div>
+      </div>
+      <div class="ema-table-wrap">
+        <table class="data-table ema-table" id="emaTable">
+          <thead>
+            <tr>
+              <th>品种</th>
+              <th>周期</th>
+              <th>最近信号</th>
+              <th>发生时间</th>
+              <th>当时价</th>
+              <th>当前趋势</th>
+              <th>开仓过滤</th>
+            </tr>
+          </thead>
+          <tbody id="emaTableBody">
+            <tr><td colspan="7" class="empty">正在计算 15m / 1h EMA 信号...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="usdt-d-box" id="usdtDBox"></div>
+    </section>
+
     <div class="main-grid">
       <div class="panel">
         <div class="panel-header">

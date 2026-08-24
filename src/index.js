@@ -1,7 +1,7 @@
 import { SignalStore, getStore } from './store.js';
 import { assembleMarketSignals } from './market-signals.js';
 import { fetchBinancePrices, fetchGlobalOverview, inverseHint } from './live-market.js';
-import { fetchAllStrategies } from './ema-strategy.js';
+import { fetchStrategyBoard } from './ema-strategy.js';
 
 export { SignalStore };
 
@@ -236,19 +236,29 @@ async function handleApi(request, env, ctx) {
     return stub.fetch('https://do/trending');
   }
 
+  if (pathname === '/api/ema-strategy') {
+    const snap = await readSnapshot(env);
+    const usdtD = snap.global?.data?.usdtDominance;
+    try {
+      const board = await fetchStrategyBoard(usdtD);
+      return json({ ...board, source: 'live', fetchedAt: Date.now() });
+    } catch {
+      const cached = snap.strategies?.data;
+      if (cached) return json({ ...cached, source: 'snapshot', fetchedAt: snap.strategies.timestamp });
+      return json({ error: 'strategy unavailable' }, 502);
+    }
+  }
+
   if (pathname === '/api/market-signals') {
     const snap = await readSnapshot(env);
     let prices = snap.prices?.data || {};
     let gold = snap.gold?.data || null;
-    let strategies = snap.strategies?.data || {};
     try {
       const live = await fetchBinancePrices();
       if (live.bitcoin) prices = { ...prices, ...live };
     } catch { /* keep snapshot prices */ }
-    try {
-      const liveStrat = await fetchAllStrategies('1h');
-      strategies = { ...strategies, ...liveStrat };
-    } catch { /* keep snapshot strategies */ }
+    const board = snap.strategies?.data || {};
+    const strategies = board['1h'] || board;
     return json(assembleMarketSignals({
       majors: snap.majors?.data || {},
       prices,

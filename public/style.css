@@ -199,6 +199,77 @@ body {
 .strategy-tag.short { color: var(--up); border-color: rgba(248,81,73,0.45); background: rgba(248,81,73,0.1); }
 .strategy-tag.watch { color: var(--text-secondary); }
 
+.ema-board {
+  margin: 0 0 16px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+}
+
+.ema-board-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.ema-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+  color: var(--blue);
+  border: 1px solid rgba(88, 166, 255, 0.4);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.ema-board-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+
+.ema-table-wrap { overflow-x: auto; }
+
+.ema-table td, .ema-table th { white-space: nowrap; }
+
+.ema-cross {
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.ema-cross.ema-up { color: #fff; background: #00b883; }
+.ema-cross.ema-down { color: #fff; background: #e84a54; }
+.ema-tf {
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.usdt-d-box {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  background: rgba(210, 153, 34, 0.06);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.usdt-d-box h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--amber);
+}
+
+.usdt-d-row { color: var(--text-secondary); }
+.usdt-d-note { font-size: 12px; color: var(--text-tertiary); margin-top: 6px; }
+
 .market-stats {
   display: flex;
   gap: 16px;

@@ -1,6 +1,6 @@
 /**
- * EMA7/21 × EMA56 趋势跟随（对应用户 Pine 策略）
- * 1h K 线：EMA56 为多空分界，EMA7 穿越 56 为信号，MACD 0 轴 + RSI6 过滤
+ * EMA7/21 × EMA56 趋势跟随（用户 Pine 策略）
+ * 15m / 1h：EMA56 为多空分界，EMA7 穿越 56 为信号，MACD 0 轴 + RSI6 过滤
  */
 
 export const STRATEGY_SYMBOLS = {
@@ -16,13 +16,16 @@ const RSI_MAX = 65;
 const RSI_MIN = 30;
 const STOP_PCT = 2;
 const TAKE_PCT = 4;
-const LOOKBACK = 8;
 const FAPI_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
+const CG = 'https://api.coingecko.com/api/v3';
 
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; CryptoDashboard/1.0)',
   Accept: 'application/json',
 };
+
+const INTERVAL_MS = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
+const SETUP_LOOKBACK = { '15m': 16, '1h': 12 };
 
 function calcEMA(closes, period) {
   if (!closes || closes.length < period) return null;
@@ -76,14 +79,6 @@ function calcRSI(closes, period = RSI_PERIOD) {
   return rsi;
 }
 
-function lastNum(arr) {
-  if (!arr) return null;
-  for (let i = arr.length - 1; i >= 0; i--) {
-    if (arr[i] != null && Number.isFinite(arr[i])) return arr[i];
-  }
-  return null;
-}
-
 function crossedUp(a, b, i) {
   return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null
     && a[i - 1] <= b[i - 1] && a[i] > b[i];
@@ -94,16 +89,31 @@ function crossedDown(a, b, i) {
     && a[i - 1] >= b[i - 1] && a[i] < b[i];
 }
 
-function barsAgo(pred, from, lookback) {
-  for (let i = 0; i <= lookback; i++) {
-    const idx = from - i;
-    if (idx < 1) break;
-    if (pred(idx)) return i;
+function findLastCross(fast, slow, from) {
+  for (let i = from; i >= 1; i--) {
+    if (crossedUp(fast, slow, i)) return { dir: 'up', index: i };
+    if (crossedDown(fast, slow, i)) return { dir: 'down', index: i };
   }
   return null;
 }
 
-function fmt(n, price) {
+function formatAgo(barsAgo, interval) {
+  if (barsAgo == null) return '--';
+  if (barsAgo === 0) return '当前K线';
+  const minutes = interval === '15m' ? barsAgo * 15 : barsAgo * 60;
+  if (minutes < 60) return `${minutes} 分钟前（${barsAgo}根${interval}）`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours < 48) {
+    return rest
+      ? `${hours}小时${rest}分前（${barsAgo}根${interval}）`
+      : `${hours} 小时前（${barsAgo}根${interval}）`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days} 天前（${barsAgo}根${interval}）`;
+}
+
+function fmtUsd(n, price) {
   if (!Number.isFinite(n)) return '--';
   if (price >= 1000) return '$' + Math.round(n).toLocaleString('en-US');
   if (price >= 100) return '$' + n.toFixed(0);
@@ -111,16 +121,23 @@ function fmt(n, price) {
   return '$' + n.toFixed(4);
 }
 
-/**
- * Pine 里 macd_strong_threshold=0.5 是绝对价格差，多币种不可比。
- * 按 0.5 / 10000 换成相对阈值，BTC 约 4、SOL 约 0.005。
- */
-function macdStrongThreshold(close) {
-  return Math.max(close * 0.00005, 1e-8);
+function fmtPctVal(n) {
+  if (!Number.isFinite(n)) return '--';
+  return n.toFixed(2) + '%';
 }
 
-export function evaluateEmaTrendStrategy(klines, coin = '') {
+function macdStrongThreshold(close) {
+  return Math.max(Math.abs(close) * 0.00005, 1e-8);
+}
+
+export function evaluateEmaTrendStrategy(klines, coin = '', opts = {}) {
+  const interval = opts.interval || '1h';
+  const valueKind = opts.valueKind || 'usd';
+  const inverse = !!opts.inverse;
+  const fmtVal = (n, ref) => (valueKind === 'pct' ? fmtPctVal(n) : fmtUsd(n, ref));
+
   const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
+  const times = (klines || []).map((k) => (Array.isArray(k) ? Number(k[0]) : Number(k.t || 0)));
   if (closes.length < 80) return null;
 
   const ema7 = calcEMA(closes, 7);
@@ -155,75 +172,103 @@ export function evaluateEmaTrendStrategy(klines, coin = '') {
   const macdBelowZero = difNow < 0;
   const strongLong = macdDiff > macdStrongThreshold(close) && difNow > (deaNow ?? 0);
   const strongShort = macdDiff > macdStrongThreshold(close) && difNow < (deaNow ?? 0);
-
   const emaAllAbove = d7 > d56 && d21 > d56;
   const emaAllBelow = d7 < d56 && d21 < d56;
 
-  const up56Ago = barsAgo((idx) => crossedUp(ema7, ema56, idx), i, LOOKBACK);
-  const down56Ago = barsAgo((idx) => crossedDown(ema7, ema56, idx), i, LOOKBACK);
-  const goldenAgo = barsAgo((idx) => crossedUp(ema7, ema21, idx), i, LOOKBACK);
-  const deadAgo = barsAgo((idx) => crossedDown(ema7, ema21, idx), i, LOOKBACK);
+  const last = findLastCross(ema7, ema56, i);
+  const lastSignal = last ? {
+    dir: last.dir,
+    label: last.dir === 'up' ? '上穿56' : '下穿56',
+    barsAgo: i - last.index,
+    timeAgoText: formatAgo(i - last.index, interval),
+    time: times[last.index] || null,
+    price: closes[last.index],
+    priceText: fmtVal(closes[last.index], close),
+    held: false,
+  } : {
+    dir: d7 > d56 ? 'up' : 'down',
+    label: d7 > d56 ? '上穿后维持' : '下穿后维持',
+    barsAgo: null,
+    timeAgoText: `近${closes.length}根内未再交叉`,
+    time: null,
+    price: close,
+    priceText: fmtVal(close, close),
+    held: true,
+  };
 
-  const longSetup = up56Ago != null && close > d56 && macdAboveZero && (strongLong || rsiNow < RSI_MAX);
-  const shortSetup = down56Ago != null && close < d56 && macdBelowZero && (strongShort || rsiNow > RSI_MIN);
+  const lookback = SETUP_LOOKBACK[interval] || 12;
+  const recentUp = lastSignal && lastSignal.dir === 'up' && lastSignal.barsAgo <= lookback;
+  const recentDown = lastSignal && lastSignal.dir === 'down' && lastSignal.barsAgo <= lookback;
+  const longSetup = recentUp && close > d56 && macdAboveZero && (strongLong || rsiNow < RSI_MAX);
+  const shortSetup = recentDown && close < d56 && macdBelowZero && (strongShort || rsiNow > RSI_MIN);
 
   let setup = 'watch';
   let setupLabel = '观望';
   if (longSetup && !shortSetup) {
     setup = 'long';
-    setupLabel = up56Ago === 0 ? '做多' : `做多 · ${up56Ago}h前上穿56`;
+    setupLabel = lastSignal.barsAgo === 0 ? '做多' : `做多（${lastSignal.timeAgoText}上穿）`;
   } else if (shortSetup && !longSetup) {
     setup = 'short';
-    setupLabel = down56Ago === 0 ? '做空' : `做空 · ${down56Ago}h前下穿56`;
+    setupLabel = lastSignal.barsAgo === 0 ? '做空' : `做空（${lastSignal.timeAgoText}下穿）`;
   }
 
   let trend = 'mixed';
   let trendLabel = '均线纠缠';
   if (emaAllAbove) {
     trend = 'long';
-    trendLabel = '多头排列 (7/21 > 56)';
+    trendLabel = '多头排列 7/21>56';
   } else if (emaAllBelow) {
     trend = 'short';
-    trendLabel = '空头排列 (7/21 < 56)';
+    trendLabel = '空头排列 7/21<56';
   }
 
   const stopLoss = setup === 'short' ? close * (1 + STOP_PCT / 100) : close * (1 - STOP_PCT / 100);
   const takeProfit = setup === 'short' ? close * (1 - TAKE_PCT / 100) : close * (1 + TAKE_PCT / 100);
 
-  const bits = [];
-  if (up56Ago === 0) bits.push('EMA7上穿56');
-  if (down56Ago === 0) bits.push('EMA7下穿56');
-  if (goldenAgo === 0) bits.push('7/21金叉');
-  if (deadAgo === 0) bits.push('7/21死叉');
-  bits.push(macdAboveZero ? 'MACD>0' : 'MACD<0');
-  bits.push(`RSI6 ${rsiNow.toFixed(0)}`);
-  if (strongLong || strongShort) bits.push('MACD强势跳过RSI');
+  let cryptoBias = null;
+  let cryptoBiasLabel = null;
+  if (inverse && lastSignal) {
+    if (lastSignal.dir === 'up') {
+      cryptoBias = 'risk-off';
+      cryptoBiasLabel = 'USDT.D 上穿 · 对 BTC/ETH 偏空';
+    } else {
+      cryptoBias = 'risk-on';
+      cryptoBiasLabel = 'USDT.D 下穿 · 对 BTC/ETH 偏多';
+    }
+  }
 
   return {
     coin,
-    interval: '1h',
+    interval,
     price: close,
+    priceText: fmtVal(close, close),
     ema7: d7,
     ema21: d21,
     ema56: d56,
     rsi6: rsiNow,
     macdDif: difNow,
     macdDea: deaNow,
+    macdAboveZero,
     trend,
     trendLabel,
     setup,
     setupLabel,
-    crossedAgo: { up56: up56Ago, down56: down56Ago, golden: goldenAgo, dead: deadAgo },
+    lastSignal,
     filters: {
-      macdZero: setup === 'short' ? macdBelowZero : macdAboveZero,
-      rsiOk: setup === 'short' ? rsiNow > RSI_MIN : rsiNow < RSI_MAX,
-      macdStrong: setup === 'short' ? strongShort : strongLong,
+      macdZero: macdAboveZero,
+      rsi6: rsiNow,
+      rsiOkLong: rsiNow < RSI_MAX,
+      rsiOkShort: rsiNow > RSI_MIN,
+      macdStrong: strongLong || strongShort,
     },
     stopLoss,
     takeProfit,
-    stopText: fmt(stopLoss, close),
-    tpText: fmt(takeProfit, close),
-    note: bits.join(' · '),
+    stopText: fmtVal(stopLoss, close),
+    tpText: fmtVal(takeProfit, close),
+    inverse,
+    cryptoBias,
+    cryptoBiasLabel,
+    approx: !!opts.approx,
   };
 }
 
@@ -234,15 +279,97 @@ export async function fetchKlines(symbol, interval = '1h', limit = 200) {
   return res.json();
 }
 
-export async function fetchAllStrategies(interval = '1h') {
-  const out = {};
-  await Promise.all(Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
-    try {
-      const klines = await fetchKlines(symbol, interval, 200);
-      out[coin] = evaluateEmaTrendStrategy(klines, coin);
-    } catch {
-      out[coin] = null;
-    }
-  }));
+async function fetchCgChart(id, days) {
+  const url = `${CG}/coins/${id}/market_chart?vs_currency=usd&days=${days}`;
+  const res = await fetch(url, { headers: FETCH_HEADERS });
+  if (!res.ok) throw new Error(`coingecko ${id} ${res.status}`);
+  return res.json();
+}
+
+function resampleLast(points, bucketMs) {
+  const buckets = new Map();
+  for (const [t, v] of points || []) {
+    if (!Number.isFinite(v)) continue;
+    const b = Math.floor(Number(t) / bucketMs) * bucketMs;
+    buckets.set(b, v);
+  }
+  return [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+function toDominanceKlines(tetherMc, btcMc, ethMc, bucketMs, scaleTo) {
+  const tR = resampleLast(tetherMc, bucketMs);
+  const bMap = Object.fromEntries(resampleLast(btcMc, bucketMs));
+  const eMap = Object.fromEntries(resampleLast(ethMc, bucketMs));
+  const rows = [];
+  for (const [t, usdt] of tR) {
+    const btc = bMap[t];
+    const eth = eMap[t];
+    if (!btc || !eth) continue;
+    const proxy = (100 * usdt) / (usdt + btc + eth);
+    rows.push([t, proxy]);
+  }
+  if (!rows.length) return [];
+  const last = rows[rows.length - 1][1];
+  const scale = Number.isFinite(scaleTo) && last > 0 ? scaleTo / last : 1;
+  return rows.map(([t, p]) => {
+    const c = p * scale;
+    return [t, c, c, c, c, 0];
+  });
+}
+
+export async function fetchUsdtDStrategies(liveUsdtD = null) {
+  const out = { '15m': null, '1h': null };
+  try {
+    const [t14, b14, e14] = await Promise.all([
+      fetchCgChart('tether', 14),
+      fetchCgChart('bitcoin', 14),
+      fetchCgChart('ethereum', 14),
+    ]);
+    const k1h = toDominanceKlines(t14.market_caps, b14.market_caps, e14.market_caps, INTERVAL_MS['1h'], liveUsdtD);
+    out['1h'] = evaluateEmaTrendStrategy(k1h, 'USDT.D', {
+      interval: '1h',
+      valueKind: 'pct',
+      inverse: true,
+      approx: true,
+    });
+  } catch { /* keep null */ }
+
+  try {
+    const [t1, b1, e1] = await Promise.all([
+      fetchCgChart('tether', 1),
+      fetchCgChart('bitcoin', 1),
+      fetchCgChart('ethereum', 1),
+    ]);
+    const k15 = toDominanceKlines(t1.market_caps, b1.market_caps, e1.market_caps, INTERVAL_MS['15m'], liveUsdtD);
+    out['15m'] = evaluateEmaTrendStrategy(k15, 'USDT.D', {
+      interval: '15m',
+      valueKind: 'pct',
+      inverse: true,
+      approx: true,
+    });
+  } catch { /* 15m optional */ }
+
   return out;
+}
+
+export async function fetchStrategyBoard(liveUsdtD = null) {
+  const board = { '15m': {}, '1h': {}, usdtD: { '15m': null, '1h': null } };
+  const jobs = [];
+  for (const interval of ['15m', '1h']) {
+    for (const [coin, symbol] of Object.entries(STRATEGY_SYMBOLS)) {
+      jobs.push((async () => {
+        try {
+          const klines = await fetchKlines(symbol, interval, 200);
+          board[interval][coin] = evaluateEmaTrendStrategy(klines, coin, { interval });
+        } catch {
+          board[interval][coin] = null;
+        }
+      })());
+    }
+  }
+  jobs.push((async () => {
+    board.usdtD = await fetchUsdtDStrategies(liveUsdtD);
+  })());
+  await Promise.all(jobs);
+  return board;
 }

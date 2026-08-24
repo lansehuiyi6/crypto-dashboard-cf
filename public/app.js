@@ -159,6 +159,73 @@ function fmtMcap(v) {
   return fmtUsd(n);
 }
 
+function emaCrossHtml(ls) {
+  if (!ls) return '<span class="ema-cross">尚无穿越</span>';
+  const cls = ls.dir === 'up' ? 'ema-up' : 'ema-down';
+  return `<span class="ema-cross ${cls}">${ls.label}</span>`;
+}
+
+function emaFilterText(row) {
+  if (!row) return '--';
+  const rsi = Number.isFinite(row.rsi6) ? row.rsi6.toFixed(0) : '--';
+  const macd = row.macdAboveZero ? 'MACD>0' : 'MACD<0';
+  const tagCls = row.setup === 'long' ? 'long' : row.setup === 'short' ? 'short' : 'watch';
+  return `<span class="strategy-tag ${tagCls}">${row.setupLabel}</span> ${macd} · RSI6 ${rsi}`;
+}
+
+function renderUsdtDBox(usdtD) {
+  const el = document.getElementById('usdtDBox');
+  if (!el) return;
+  if (!usdtD || (!usdtD['1h'] && !usdtD['15m'])) {
+    el.innerHTML = '<h3>USDT.D EMA</h3><div class="usdt-d-note">暂无 K 线（CoinGecko 限流或数据不足）。USDT.D 与 BTC/ETH 多为反向。</div>';
+    return;
+  }
+  const lines = ['15m', '1h'].map((tf) => {
+    const row = usdtD[tf];
+    if (!row) return `<div class="usdt-d-row">${tf}：暂无</div>`;
+    const ls = row.lastSignal;
+    return `<div class="usdt-d-row">${tf}：现价 ${row.priceText} · ${row.trendLabel} · 最近 ${ls ? ls.label + ' ' + ls.timeAgoText + '（' + ls.priceText + '）' : '尚无穿越'} · ${row.cryptoBiasLabel || emaFilterText(row)}</div>`;
+  }).join('');
+  el.innerHTML = `
+    <h3>USDT.D（稳定币市值占比）EMA7/21/56</h3>
+    ${lines}
+    <div class="usdt-d-note">币安没有 USDT.D 合约。这里用 Tether / (BTC+ETH+USDT) 市值比，再校准到当前 USDT.D。上穿 56 = 资金进稳定币，对 BTC/ETH 偏空；下穿相反。15m 数据较短，交叉可能不如 1h 稳定。</div>
+  `;
+}
+
+async function loadEmaStrategy() {
+  const body = document.getElementById('emaTableBody');
+  try {
+    const data = await fetchJSON('/api/ema-strategy');
+    const coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
+    const html = [];
+    for (const coin of coins) {
+      for (const tf of ['15m', '1h']) {
+        const row = data[tf] && data[tf][coin];
+        if (!row) {
+          html.push(`<tr><td>${coin}</td><td><span class="ema-tf">${tf}</span></td><td colspan="5" class="empty">该周期暂无数据</td></tr>`);
+          continue;
+        }
+        const ls = row.lastSignal;
+        html.push(`<tr>
+          <td>${coin}</td>
+          <td><span class="ema-tf">${tf}</span></td>
+          <td>${emaCrossHtml(ls)}</td>
+          <td>${ls ? ls.timeAgoText : '--'}</td>
+          <td>${ls ? ls.priceText : '--'}</td>
+          <td>${row.trendLabel || '--'}</td>
+          <td>${emaFilterText(row)}</td>
+        </tr>`);
+      }
+    }
+    if (body) body.innerHTML = html.join('');
+    renderUsdtDBox(data.usdtD);
+  } catch (e) {
+    console.warn('EMA strategy fetch failed:', e.message);
+    if (body) body.innerHTML = '<tr><td colspan="7" class="empty">EMA 策略获取失败，稍后重试</td></tr>';
+  }
+}
+
 async function fetchOverview() {
   try {
     const ov = await fetchJSON('/api/overview');
@@ -354,7 +421,9 @@ async function loadMarketSignals() {
               <span class="strategy-tag ${tagCls}">EMA ${ema.setupLabel || '观望'}</span>
               <span class="strategy-tag">${ema.trendLabel || ''}</span>
             </div>
-            <div>${ema.note || ''}</div>
+            ${ema.lastSignal
+              ? `<div>最近信号：<strong>${ema.lastSignal.label}</strong> · ${ema.lastSignal.timeAgoText} · ${ema.lastSignal.priceText}</div>`
+              : '<div>最近信号：尚无 EMA7/56 穿越</div>'}
             ${ema.setup === 'long' || ema.setup === 'short'
               ? `<div>参考止损 ${ema.stopText || '--'} · 止盈 ${ema.tpText || '--'} （2%/4%）</div>`
               : ''}
@@ -783,6 +852,7 @@ async function refreshAll() {
     fetchCoinGeckoPrices(),
     fetchGoldPrice(),
     fetchOverview(),
+    loadEmaStrategy(),
     loadValuescanData(),
     loadMarketSignals(),
     loadOwnSignals(),
@@ -800,6 +870,7 @@ refreshAll();
 setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
 setInterval(fetchOverview, 60000);
+setInterval(loadEmaStrategy, 60000);
 setInterval(loadValuescanData, 180000);
 setInterval(() => loadOwnSignals(), 300000); // 信号引擎每5分钟刷新
 setInterval(() => loadReversalSignals(), 300000); // 反转信号每5分钟刷新

@@ -14,7 +14,7 @@ import {
 } from '../src/signal-engine.js';
 import { buildMajors } from '../src/market-signals.js';
 import { fetchGlobalOverview } from '../src/live-market.js';
-import { fetchAllStrategies } from '../src/ema-strategy.js';
+import { fetchStrategyBoard } from '../src/ema-strategy.js';
 
 const WORKER_URL = (process.env.WORKER_URL || '').replace(/\/$/, '');
 const CRON_SECRET = process.env.CRON_SECRET || '';
@@ -187,8 +187,8 @@ async function main() {
   const majors = buildMajors(coins, historyById, gold);
   let strategies = {};
   try {
-    strategies = await fetchAllStrategies('1h');
-    console.log('[scan] strategies', Object.keys(strategies).filter((k) => strategies[k]));
+    strategies = await fetchStrategyBoard(global?.usdtDominance);
+    console.log('[scan] strategies 1h', Object.keys(strategies['1h'] || {}).filter((k) => strategies['1h'][k]));
   } catch (e) {
     console.warn('[scan] strategies failed', e.message);
   }
