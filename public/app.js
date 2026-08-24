@@ -21,7 +21,7 @@ function fmtPrice(v) {
 
 function fmtPct(v) {
   const n = Number(v);
-  if (!Number.isFinite(n)) return '--';
+  if (v == null || !Number.isFinite(n)) return '--';
   const sign = n > 0 ? '+' : '';
   return sign + n.toFixed(2) + '%';
 }
@@ -1048,15 +1048,6 @@ function fmtShort(n) {
   if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(2) + 'K';
   if (Math.abs(n) >= 1) return n.toFixed(4);
   return n.toFixed(8);
-}
-
-/**
- * 格式化百分比
- */
-function fmtPct(v) {
-  if (v == null || isNaN(v)) return '--';
-  const sign = v > 0 ? '+' : '';
-  return sign + v.toFixed(2) + '%';
 }
 
 /**
