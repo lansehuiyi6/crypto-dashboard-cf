@@ -1,7 +1,13 @@
 /**
  * K 线拉取（扫描脚本 / Worker 兜底）
  */
-import { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy } from '../public/ema-core.js';
+import {
+  STRATEGY_SYMBOLS,
+  evaluateEmaTrendStrategy,
+  resampleLast,
+  toDominanceKlines,
+  INTERVAL_MS,
+} from '../public/ema-core.js';
 
 export { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy };
 
@@ -26,8 +32,6 @@ const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; CryptoDashboard/1.0)',
   Accept: 'application/json',
 };
-const INTERVAL_MS = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
-
 export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT) {
   const symbols = SYMBOL_ALIASES[symbol] || [symbol];
   let lastErr = null;
@@ -109,37 +113,6 @@ async function fetchCgChart(id, days) {
   const res = await fetch(url, { headers: FETCH_HEADERS });
   if (!res.ok) throw new Error(`coingecko ${id} ${res.status}`);
   return res.json();
-}
-
-function resampleLast(points, bucketMs) {
-  const buckets = new Map();
-  for (const [t, v] of points || []) {
-    if (!Number.isFinite(v)) continue;
-    const b = Math.floor(Number(t) / bucketMs) * bucketMs;
-    buckets.set(b, v);
-  }
-  return [...buckets.entries()].sort((a, b) => a[0] - b[0]);
-}
-
-function toDominanceKlines(tetherMc, btcMc, ethMc, bucketMs, scaleTo) {
-  const tR = resampleLast(tetherMc, bucketMs);
-  const bMap = Object.fromEntries(resampleLast(btcMc, bucketMs));
-  const eMap = Object.fromEntries(resampleLast(ethMc, bucketMs));
-  const rows = [];
-  for (const [t, usdt] of tR) {
-    const btc = bMap[t];
-    const eth = eMap[t];
-    if (!btc || !eth) continue;
-    const proxy = (100 * usdt) / (usdt + btc + eth);
-    rows.push([t, proxy]);
-  }
-  if (!rows.length) return [];
-  const last = rows[rows.length - 1][1];
-  const scale = Number.isFinite(scaleTo) && last > 0 ? scaleTo / last : 1;
-  return rows.map(([t, p]) => {
-    const c = p * scale;
-    return [t, c, c, c, c, 0];
-  });
 }
 
 export async function fetchUsdtDStrategies(liveUsdtD = null) {

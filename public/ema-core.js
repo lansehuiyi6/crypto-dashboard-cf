@@ -14,8 +14,39 @@ const RSI_MAX = 65;
 const RSI_MIN = 30;
 const STOP_PCT = 2;
 const TAKE_PCT = 4;
-const INTERVAL_MS = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
+export const INTERVAL_MS = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
 const SETUP_LOOKBACK = { '15m': 16, '1h': 12 };
+
+export function resampleLast(points, bucketMs) {
+  const buckets = new Map();
+  for (const [t, v] of points || []) {
+    if (!Number.isFinite(v)) continue;
+    const b = Math.floor(Number(t) / bucketMs) * bucketMs;
+    buckets.set(b, v);
+  }
+  return [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+export function toDominanceKlines(tetherMc, btcMc, ethMc, bucketMs, scaleTo) {
+  const tR = resampleLast(tetherMc, bucketMs);
+  const bMap = Object.fromEntries(resampleLast(btcMc, bucketMs));
+  const eMap = Object.fromEntries(resampleLast(ethMc, bucketMs));
+  const rows = [];
+  for (const [t, usdt] of tR) {
+    const btc = bMap[t];
+    const eth = eMap[t];
+    if (!btc || !eth) continue;
+    const proxy = (100 * usdt) / (usdt + btc + eth);
+    rows.push([t, proxy]);
+  }
+  if (!rows.length) return [];
+  const last = rows[rows.length - 1][1];
+  const scale = Number.isFinite(scaleTo) && last > 0 ? scaleTo / last : 1;
+  return rows.map(([t, p]) => {
+    const c = p * scale;
+    return [t, c, c, c, c, 0];
+  });
+}
 
 function calcEMA(closes, period) {
   if (!closes || closes.length < period) return null;

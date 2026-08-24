@@ -1,4 +1,9 @@
-import { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy } from './ema-core.js';
+import {
+  STRATEGY_SYMBOLS,
+  evaluateEmaTrendStrategy,
+  toDominanceKlines,
+  INTERVAL_MS,
+} from './ema-core.js';
 
 
 const COINGECKO_IDS = {
@@ -139,7 +144,57 @@ async function fetchBoardInBrowser() {
       }
     }),
   ));
+  try {
+    board.usdtD = await fetchUsdtDInBrowser();
+  } catch (e) {
+    board.errors.push('USDT.D: ' + (e.message || e));
+  }
   return board;
+}
+
+async function fetchCgMcaps(id, days) {
+  const res = await fetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`);
+  if (!res.ok) throw new Error('cg ' + id + ' ' + res.status);
+  const data = await res.json();
+  return data.market_caps || [];
+}
+
+async function fetchUsdtDInBrowser() {
+  const out = { '15m': null, '1h': null };
+  let scaleTo = null;
+  try {
+    const g = await fetch('https://api.coingecko.com/api/v3/global').then((r) => r.json());
+    scaleTo = Number(g?.data?.market_cap_percentage?.usdt);
+  } catch { /* optional scale */ }
+
+  try {
+    const [t, b, e] = await Promise.all([
+      fetchCgMcaps('tether', 14),
+      fetchCgMcaps('bitcoin', 14),
+      fetchCgMcaps('ethereum', 14),
+    ]);
+    const k1h = toDominanceKlines(t, b, e, INTERVAL_MS['1h'], scaleTo);
+    out['1h'] = evaluateEmaTrendStrategy(k1h, 'USDT.D', {
+      interval: '1h', valueKind: 'pct', inverse: true, approx: true,
+    });
+  } catch (e) {
+    console.warn('USDT.D 1h failed', e.message);
+  }
+
+  try {
+    const [t, b, e] = await Promise.all([
+      fetchCgMcaps('tether', 1),
+      fetchCgMcaps('bitcoin', 1),
+      fetchCgMcaps('ethereum', 1),
+    ]);
+    const k15 = toDominanceKlines(t, b, e, INTERVAL_MS['15m'], scaleTo);
+    out['15m'] = evaluateEmaTrendStrategy(k15, 'USDT.D', {
+      interval: '15m', valueKind: 'pct', inverse: true, approx: true,
+    });
+  } catch (e) {
+    console.warn('USDT.D 15m failed', e.message);
+  }
+  return out;
 }
 
 function boardHasClientRows(board) {
