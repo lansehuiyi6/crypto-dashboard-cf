@@ -39,7 +39,10 @@
       <div class="ema-board-header">
         <h2>EMA7/21/56 策略 <span class="ema-badge">15m / 1h</span></h2>
         <div class="ema-board-desc">
-          EMA56 为多空分界，EMA7 穿越 56 为信号；MACD 在 0 轴同向、RSI6 不极端才开仓。下表给出<strong>最近一次上穿/下穿</strong>，以及当前是否满足做多/做空。
+          <strong>上穿/下穿56</strong>只是穿越标记，不是开仓。
+          <strong>做多/做空</strong>才叠加 MACD 0 轴 + RSI6 过滤。
+          <strong>AlphaTrend</strong>当方向开关（绿只允许多、红只允许空）。
+          <strong>共振开仓</strong> = AT 方向 ∩ EMA 过滤做多/做空。
         </div>
       </div>
       <div class="ema-table-wrap">
@@ -48,15 +51,15 @@
             <tr>
               <th>品种</th>
               <th>周期</th>
-              <th>最近信号</th>
+              <th>最近穿越</th>
               <th>发生时间</th>
-              <th>当时价</th>
-              <th>当前趋势</th>
-              <th>开仓过滤</th>
+              <th>过滤开仓</th>
+              <th>AlphaTrend</th>
+              <th>共振</th>
             </tr>
           </thead>
           <tbody id="emaTableBody">
-            <tr><td colspan="7" class="empty">正在计算 15m / 1h EMA 信号...</td></tr>
+            <tr><td colspan="7" class="empty">正在计算 15m / 1h EMA + AlphaTrend...</td></tr>
           </tbody>
         </table>
       </div>

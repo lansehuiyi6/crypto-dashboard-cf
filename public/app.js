@@ -1,6 +1,7 @@
 import {
   STRATEGY_SYMBOLS,
   evaluateEmaTrendStrategy,
+  attachAlphaTrend,
   toDominanceKlines,
   INTERVAL_MS,
 } from './ema-core.js';
@@ -136,7 +137,8 @@ async function fetchBoardInBrowser() {
     Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
       try {
         const klines = await fetchKlinesClient(symbol, interval);
-        board[interval][coin] = evaluateEmaTrendStrategy(klines, coin, { interval });
+        const row = evaluateEmaTrendStrategy(klines, coin, { interval });
+        board[interval][coin] = row ? attachAlphaTrend(row, klines, { interval }) : null;
         if (!board[interval][coin]) board.errors.push(coin + ' ' + interval + ': 指标不足');
       } catch (e) {
         board[interval][coin] = null;
@@ -301,6 +303,19 @@ function emaFilterText(row) {
   return `<span class="strategy-tag ${tagCls}">${row.setupLabel}</span> ${macd} · RSI6 ${rsi}`;
 }
 
+function alphaHtml(at) {
+  if (!at) return '<span class="strategy-tag watch">--</span>';
+  const cls = at.bull ? 'long' : at.bear ? 'short' : 'watch';
+  return `<span class="strategy-tag ${cls}">${at.stateLabel}</span> ${at.lastEventLabel || ''}`;
+}
+
+function combinedHtml(row) {
+  const c = row && row.combined;
+  if (!c) return '--';
+  const cls = c.dir === 'long' ? 'long' : c.dir === 'short' ? 'short' : 'watch';
+  return `<span class="strategy-tag ${cls}">${c.label}</span>`;
+}
+
 function renderUsdtDBox(usdtD) {
   const el = document.getElementById('usdtDBox');
   if (!el) return;
@@ -352,9 +367,9 @@ async function loadEmaStrategy() {
           <td><span class="ema-tf">${tf}</span></td>
           <td>${emaCrossHtml(ls)}</td>
           <td>${ls ? ls.timeAgoText : '--'}</td>
-          <td>${ls ? ls.priceText : '--'}</td>
-          <td>${row.trendLabel || '--'}</td>
           <td>${emaFilterText(row)}</td>
+          <td>${alphaHtml(row.alpha)}</td>
+          <td title="${(row.combined && row.combined.reason) || ''}">${combinedHtml(row)}</td>
         </tr>`);
       }
     }
@@ -589,7 +604,13 @@ function clientEssay(tfLabel, ema, s1, r1) {
   } else {
     action = `穿越、MACD 同向、RSI 不极端尚未同时成立，这个周期先观望：多等回踩 ${s1}，空等反抽 ${r1}。`;
   }
-  return `${tfLabel}目前是${align}。${cross}${macd}${rsi}。${action}`;
+  const at = ema.alpha;
+  let atText = '';
+  if (at) {
+    atText = `AlphaTrend ${at.stateLabel}，${at.lastEventLabel}。`;
+  }
+  const comb = ema.combined ? `合成：${ema.combined.label}（${ema.combined.reason}）。` : '';
+  return `${tfLabel}目前是${align}。${cross}${macd}${rsi}。${atText}${action}${comb}`;
 }
 
 function renderShortSignalCards() {

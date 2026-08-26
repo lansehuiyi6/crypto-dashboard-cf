@@ -290,6 +290,199 @@ export function evaluateEmaTrendStrategy(klines, coin = '', opts = {}) {
     cryptoBias,
     cryptoBiasLabel,
     approx: !!opts.approx,
+    crossCandidate: !!(recentUp || recentDown),
+    crossCandidateLabel: recentUp ? '上穿56候选' : recentDown ? '下穿56候选' : '',
   };
+}
+
+function rollingSma(values, period, i) {
+  if (i < period - 1) return null;
+  let s = 0;
+  for (let j = i - period + 1; j <= i; j++) {
+    if (!Number.isFinite(values[j])) return null;
+    s += values[j];
+  }
+  return s / period;
+}
+
+function barsSinceTrue(flags, i) {
+  for (let j = i; j >= 0; j--) {
+    if (flags[j]) return i - j;
+  }
+  return null;
+}
+
+/**
+ * AlphaTrend：ATR 通道 + MFI 体制过滤。
+ * 用作方向开关，不单独当开仓理由。默认 multiplier=1.5（加密比 1.0 少抖）。
+ */
+export function evaluateAlphaTrend(klines, coin = '', opts = {}) {
+  const period = opts.period || 14;
+  const multiplier = opts.multiplier == null ? 1.5 : Number(opts.multiplier);
+  const interval = opts.interval || '1h';
+  if (!klines || klines.length < period + 5) return null;
+
+  const n = klines.length;
+  const high = new Array(n);
+  const low = new Array(n);
+  const close = new Array(n);
+  const vol = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = klines[i];
+    high[i] = Array.isArray(k) ? Number(k[2]) : Number(k.h);
+    low[i] = Array.isArray(k) ? Number(k[3]) : Number(k.l);
+    close[i] = Array.isArray(k) ? Number(k[4]) : Number(k.c);
+    vol[i] = Array.isArray(k) ? Number(k[5]) : Number(k.v || 0);
+  }
+
+  const tr = new Array(n).fill(null);
+  const gain = new Array(n).fill(0);
+  const loss = new Array(n).fill(0);
+  const typical = new Array(n);
+  for (let i = 0; i < n; i++) {
+    typical[i] = (high[i] + low[i] + close[i]) / 3;
+    if (i === 0) {
+      tr[i] = high[i] - low[i];
+      continue;
+    }
+    tr[i] = Math.max(high[i] - low[i], Math.abs(high[i] - close[i - 1]), Math.abs(low[i] - close[i - 1]));
+    const d = close[i] - close[i - 1];
+    gain[i] = Math.max(d, 0);
+    loss[i] = Math.max(-d, 0);
+  }
+
+  const alpha = new Array(n).fill(null);
+  let prevAlpha = null;
+  const buyCross = new Array(n).fill(false);
+  const sellCross = new Array(n).fill(false);
+
+  for (let i = 0; i < n; i++) {
+    const atr = rollingSma(tr, period, i);
+    if (atr == null) continue;
+    const avgG = rollingSma(gain, period, i);
+    const avgL = rollingSma(loss, period, i);
+    const rsi = avgL === 0 ? 100 : (avgG == null || avgL == null ? null : 100 - 100 / (1 + avgG / avgL));
+
+    let posMf = 0;
+    let negMf = 0;
+    let mfiReady = i >= period;
+    if (mfiReady) {
+      for (let j = i - period + 1; j <= i; j++) {
+        if (j === 0) continue;
+        const flow = typical[j] * (vol[j] || 0);
+        if (typical[j] > typical[j - 1]) posMf += flow;
+        else if (typical[j] < typical[j - 1]) negMf += flow;
+      }
+    }
+    const mfi = !mfiReady ? null : (negMf === 0 ? 100 : 100 - 100 / (1 + posMf / negMf));
+    const regime = mfi != null ? mfi >= 50 : (rsi != null ? rsi >= 50 : false);
+
+    const upT = low[i] - atr * multiplier;
+    const downT = high[i] + atr * multiplier;
+    let a;
+    if (prevAlpha == null) {
+      a = regime ? upT : downT;
+    } else if (regime) {
+      a = upT < prevAlpha ? prevAlpha : upT;
+    } else {
+      a = downT > prevAlpha ? prevAlpha : downT;
+    }
+    alpha[i] = a;
+    prevAlpha = a;
+
+    if (i >= 3 && alpha[i - 1] != null && alpha[i - 2] != null && alpha[i - 3] != null) {
+      buyCross[i] = alpha[i] > alpha[i - 2] && alpha[i - 1] <= alpha[i - 3];
+      sellCross[i] = alpha[i] < alpha[i - 2] && alpha[i - 1] >= alpha[i - 3];
+    }
+  }
+
+  const i = n - 1;
+  if (alpha[i] == null || alpha[i - 2] == null) return null;
+  const bull = alpha[i] > alpha[i - 2];
+  const bear = alpha[i] < alpha[i - 2];
+
+  const k1 = barsSinceTrue(buyCross, i);
+  const k2 = barsSinceTrue(sellCross, i);
+  const o1 = i > 0 ? barsSinceTrue(buyCross, i - 1) : null;
+  const o2 = i > 0 ? barsSinceTrue(sellCross, i - 1) : null;
+  const buyEvent = buyCross[i] && (k2 == null || o1 == null || o1 > k2);
+  const sellEvent = sellCross[i] && (k1 == null || o2 == null || o2 > k1);
+
+  let lastBuy = null;
+  let lastSell = null;
+  for (let j = i; j >= period; j--) {
+    if (lastBuy == null && buyCross[j]) lastBuy = i - j;
+    if (lastSell == null && sellCross[j]) lastSell = i - j;
+    if (lastBuy != null && lastSell != null) break;
+  }
+
+  return {
+    coin,
+    interval,
+    multiplier,
+    alpha: alpha[i],
+    alpha2: alpha[i - 2],
+    bull,
+    bear,
+    color: bull ? 'green' : 'red',
+    stateLabel: bull ? 'AT多（绿）' : bear ? 'AT空（红）' : 'AT中性',
+    buyEvent,
+    sellEvent,
+    lastBuyAgo: lastBuy,
+    lastSellAgo: lastSell,
+    lastEventLabel: buyEvent
+      ? 'Potential BUY'
+      : sellEvent
+        ? 'Potential SELL'
+        : (lastBuy != null && (lastSell == null || lastBuy < lastSell)
+          ? `上次BUY ${formatAgo(lastBuy, interval)}`
+          : lastSell != null
+            ? `上次SELL ${formatAgo(lastSell, interval)}`
+            : '无交叉'),
+  };
+}
+
+export function combineEmaAlpha(ema, at) {
+  if (!ema) return null;
+  if (!at) {
+    return {
+      dir: ema.setup === 'long' ? 'long' : ema.setup === 'short' ? 'short' : 'watch',
+      label: ema.setupLabel || '观望',
+      reason: 'AlphaTrend 未就绪，仅看 EMA 过滤开仓',
+    };
+  }
+  if (at.bull && ema.setup === 'long') {
+    return { dir: 'long', label: '共振做多', reason: 'AlphaTrend 允许多 + EMA 过滤做多' };
+  }
+  if (at.bear && ema.setup === 'short') {
+    return { dir: 'short', label: '共振做空', reason: 'AlphaTrend 允许空 + EMA 过滤做空' };
+  }
+  if (at.bull && ema.setup === 'short') {
+    return { dir: 'watch', label: '分歧观望', reason: 'AT 只允许多，但 EMA 过滤给出做空' };
+  }
+  if (at.bear && ema.setup === 'long') {
+    return { dir: 'watch', label: '分歧观望', reason: 'AT 只允许空，但 EMA 过滤给出做多' };
+  }
+  if (at.bull && ema.crossCandidate && ema.lastSignal?.dir === 'up') {
+    return { dir: 'watch', label: 'AT多·上穿未过滤', reason: '有上穿56，但 MACD/RSI 未过，不能当开仓' };
+  }
+  if (at.bear && ema.crossCandidate && ema.lastSignal?.dir === 'down') {
+    return { dir: 'watch', label: 'AT空·下穿未过滤', reason: '有下穿56，但 MACD/RSI 未过，不能当开仓' };
+  }
+  if (at.bull) {
+    return { dir: 'watch', label: 'AT多·等EMA', reason: '只允许做多，等 EMA 过滤做多' };
+  }
+  if (at.bear) {
+    return { dir: 'watch', label: 'AT空·等EMA', reason: '只允许做空，等 EMA 过滤做空' };
+  }
+  return { dir: 'watch', label: '观望', reason: 'AlphaTrend 未给出方向' };
+}
+
+export function attachAlphaTrend(ema, klines, opts = {}) {
+  if (!ema) return null;
+  const at = evaluateAlphaTrend(klines, ema.coin, opts);
+  ema.alpha = at;
+  ema.combined = combineEmaAlpha(ema, at);
+  return ema;
 }
 

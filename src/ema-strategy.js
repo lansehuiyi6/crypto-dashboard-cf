@@ -4,6 +4,7 @@
 import {
   STRATEGY_SYMBOLS,
   evaluateEmaTrendStrategy,
+  attachAlphaTrend,
   resampleLast,
   toDominanceKlines,
   INTERVAL_MS,
@@ -166,8 +167,8 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
             klines = await fetchCgKlines(coin, interval);
           }
           const row = evaluateEmaTrendStrategy(klines, coin, { interval });
-          board[interval][coin] = row;
-          if (!row) board.errors.push(`${coin} ${interval}: 指标不足`);
+          board[interval][coin] = row ? attachAlphaTrend(row, klines, { interval }) : null;
+          if (!board[interval][coin]) board.errors.push(`${coin} ${interval}: 指标不足`);
         } catch (e) {
           board[interval][coin] = null;
           board.errors.push(`${coin} ${interval}: ${e.message || e}`);
