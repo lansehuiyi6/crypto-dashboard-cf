@@ -316,6 +316,20 @@ function combinedHtml(row) {
   return `<span class="strategy-tag ${cls}">${c.label}</span>`;
 }
 
+function bbHtml(bb) {
+  if (!bb) return '<span class="strategy-tag watch">--</span>';
+  const cls = bb.width === 'expand'
+    ? (bb.zone === 'lower' || bb.zone === 'below' ? 'short' : 'long')
+    : 'watch';
+  return `<span class="strategy-tag ${cls}" title="${bb.hint || ''}">${bb.label}</span>`;
+}
+
+function bollMidHtml(bm) {
+  if (!bm) return '<span class="strategy-tag watch">--</span>';
+  const cls = bm.setup === 'long' ? 'long' : bm.setup === 'short' ? 'short' : 'watch';
+  return `<span class="strategy-tag ${cls}" title="${bm.hint || ''}">${bm.setupLabel}</span> ${bm.lastLabel || ''}`;
+}
+
 function renderUsdtDBox(usdtD) {
   const el = document.getElementById('usdtDBox');
   if (!el) return;
@@ -357,7 +371,7 @@ async function loadEmaStrategy() {
       for (const tf of ['15m', '1h']) {
         const row = data[tf] && data[tf][coin];
         if (!row || !row.lastSignal) {
-          html.push(`<tr><td>${coin}</td><td><span class="ema-tf">${tf}</span></td><td colspan="5" class="empty">K线未返回</td></tr>`);
+          html.push(`<tr><td>${coin}</td><td><span class="ema-tf">${tf}</span></td><td colspan="7" class="empty">K线未返回</td></tr>`);
           continue;
         }
         filled += 1;
@@ -369,6 +383,8 @@ async function loadEmaStrategy() {
           <td>${ls ? ls.timeAgoText : '--'}</td>
           <td>${emaFilterText(row)}</td>
           <td>${alphaHtml(row.alpha)}</td>
+          <td>${bbHtml(row.bb)}</td>
+          <td>${bollMidHtml(row.bollMid)}</td>
           <td title="${(row.combined && row.combined.reason) || ''}">${combinedHtml(row)}</td>
         </tr>`);
       }
@@ -609,8 +625,12 @@ function clientEssay(tfLabel, ema, s1, r1) {
   if (at) {
     atText = `AlphaTrend ${at.stateLabel}，${at.lastEventLabel}。`;
   }
+  const bb = ema.bb;
+  const bbText = bb ? `布林${bb.widthLabel}，价格${bb.zoneLabel}（%B ${bb.pctB.toFixed(2)}）。${bb.hint}。` : '';
+  const bm = ema.bollMid;
+  const bmText = bm ? `中轴策略：${bm.hint}` : '';
   const comb = ema.combined ? `合成：${ema.combined.label}（${ema.combined.reason}）。` : '';
-  return `${tfLabel}目前是${align}。${cross}${macd}${rsi}。${atText}${action}${comb}`;
+  return `${tfLabel}目前是${align}。${cross}${macd}${rsi}。${atText}${bbText}${bmText}${action}${comb}`;
 }
 
 function renderShortSignalCards() {

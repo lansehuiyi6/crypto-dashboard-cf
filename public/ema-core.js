@@ -442,47 +442,387 @@ export function evaluateAlphaTrend(klines, coin = '', opts = {}) {
   };
 }
 
-export function combineEmaAlpha(ema, at) {
+export function combineEmaAlpha(ema, at, bb) {
   if (!ema) return null;
+
+  let base;
   if (!at) {
-    return {
+    base = {
       dir: ema.setup === 'long' ? 'long' : ema.setup === 'short' ? 'short' : 'watch',
       label: ema.setupLabel || '观望',
       reason: 'AlphaTrend 未就绪，仅看 EMA 过滤开仓',
     };
+  } else if (at.bull && ema.setup === 'long') {
+    base = { dir: 'long', label: '共振做多', reason: 'AlphaTrend 允许多 + EMA 过滤做多' };
+  } else if (at.bear && ema.setup === 'short') {
+    base = { dir: 'short', label: '共振做空', reason: 'AlphaTrend 允许空 + EMA 过滤做空' };
+  } else if (at.bull && ema.setup === 'short') {
+    base = { dir: 'watch', label: '分歧观望', reason: 'AT 只允许多，但 EMA 过滤给出做空' };
+  } else if (at.bear && ema.setup === 'long') {
+    base = { dir: 'watch', label: '分歧观望', reason: 'AT 只允许空，但 EMA 过滤给出做多' };
+  } else if (at.bull && ema.crossCandidate && ema.lastSignal?.dir === 'up') {
+    base = { dir: 'watch', label: 'AT多·上穿未过滤', reason: '有上穿56，但 MACD/RSI 未过，不能当开仓' };
+  } else if (at.bear && ema.crossCandidate && ema.lastSignal?.dir === 'down') {
+    base = { dir: 'watch', label: 'AT空·下穿未过滤', reason: '有下穿56，但 MACD/RSI 未过，不能当开仓' };
+  } else if (at.bull) {
+    base = { dir: 'watch', label: 'AT多·等EMA', reason: '只允许做多，等 EMA 过滤做多' };
+  } else if (at.bear) {
+    base = { dir: 'watch', label: 'AT空·等EMA', reason: '只允许做空，等 EMA 过滤做空' };
+  } else {
+    base = { dir: 'watch', label: '观望', reason: 'AlphaTrend 未给出方向' };
   }
-  if (at.bull && ema.setup === 'long') {
-    return { dir: 'long', label: '共振做多', reason: 'AlphaTrend 允许多 + EMA 过滤做多' };
+
+  if (!bb) return base;
+
+  const squeeze = bb.width === 'squeeze';
+  const expand = bb.width === 'expand';
+  const alignedLong = base.dir === 'long';
+  const alignedShort = base.dir === 'short';
+  const atLongWait = at && at.bull && base.dir === 'watch';
+  const atShortWait = at && at.bear && base.dir === 'watch';
+
+  if (squeeze && (alignedLong || alignedShort)) {
+    return {
+      dir: 'watch',
+      label: '闭口暂缓',
+      reason: `${bb.widthLabel}，新趋势多半还没开始，即使 EMA/AT 同向也不追。等突然开口再顺着 ${alignedLong ? '多' : '空'}`,
+    };
   }
-  if (at.bear && ema.setup === 'short') {
-    return { dir: 'short', label: '共振做空', reason: 'AlphaTrend 允许空 + EMA 过滤做空' };
+  if (expand && alignedLong) {
+    const walk = bb.walkUpper || bb.zone === 'upper' || bb.zone === 'above';
+    return {
+      dir: 'long',
+      label: '开口共振做多',
+      reason: `${bb.widthLabel}像新趋势启动，AT+EMA 同向多${walk ? '，且价格沿上轨' : ''}。顺势不摸头`,
+    };
   }
-  if (at.bull && ema.setup === 'short') {
-    return { dir: 'watch', label: '分歧观望', reason: 'AT 只允许多，但 EMA 过滤给出做空' };
+  if (expand && alignedShort) {
+    const walk = bb.walkLower || bb.zone === 'lower' || bb.zone === 'below';
+    return {
+      dir: 'short',
+      label: '开口共振做空',
+      reason: `${bb.widthLabel}像新趋势启动，AT+EMA 同向空${walk ? '，且价格沿下轨' : ''}。顺势不抄底`,
+    };
   }
-  if (at.bear && ema.setup === 'long') {
-    return { dir: 'watch', label: '分歧观望', reason: 'AT 只允许空，但 EMA 过滤给出做多' };
+  if (expand && atLongWait) {
+    return {
+      dir: 'watch',
+      label: '开口·等EMA多',
+      reason: `${bb.widthLabel}有利开多，AT 已允许多，还差 EMA 过滤做多`,
+    };
   }
-  if (at.bull && ema.crossCandidate && ema.lastSignal?.dir === 'up') {
-    return { dir: 'watch', label: 'AT多·上穿未过滤', reason: '有上穿56，但 MACD/RSI 未过，不能当开仓' };
+  if (expand && atShortWait) {
+    return {
+      dir: 'watch',
+      label: '开口·等EMA空',
+      reason: `${bb.widthLabel}有利开空，AT 已允许空，还差 EMA 过滤做空`,
+    };
   }
-  if (at.bear && ema.crossCandidate && ema.lastSignal?.dir === 'down') {
-    return { dir: 'watch', label: 'AT空·下穿未过滤', reason: '有下穿56，但 MACD/RSI 未过，不能当开仓' };
+  if (bb.width === 'stable' && (alignedLong || alignedShort)) {
+    return {
+      ...base,
+      label: alignedLong ? '震荡环境做多' : '震荡环境做空',
+      reason: `${base.reason}。但${bb.widthLabel}，更像摆动不是新趋势，仓位宜轻，按中轨思路`,
+    };
   }
-  if (at.bull) {
-    return { dir: 'watch', label: 'AT多·等EMA', reason: '只允许做多，等 EMA 过滤做多' };
+  return base;
+}
+
+/**
+ * 布林带 BB(20, 2)：带宽看开口/闭口/震荡，%B 看上轨/中轨/下轨。
+ * 成熟用法：闭口蓄势等方向；开口顺势不摸头；宽度稳定时上轨高抛、下轨低吸。
+ */
+export function evaluateBollinger(klines, coin = '', opts = {}) {
+  const period = opts.bbPeriod || 20;
+  const k = opts.bbK == null ? 2 : Number(opts.bbK);
+  const interval = opts.interval || '1h';
+  if (!klines || klines.length < period + 8) return null;
+
+  const closes = klines.map((row) => (Array.isArray(row) ? Number(row[4]) : Number(row.c)));
+  const n = closes.length;
+  const mid = new Array(n).fill(null);
+  const upper = new Array(n).fill(null);
+  const lower = new Array(n).fill(null);
+  const bw = new Array(n).fill(null);
+  const pctB = new Array(n).fill(null);
+
+  for (let i = period - 1; i < n; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j];
+    const m = sum / period;
+    let v = 0;
+    for (let j = i - period + 1; j <= i; j++) v += (closes[j] - m) ** 2;
+    const sd = Math.sqrt(v / period);
+    const u = m + k * sd;
+    const l = m - k * sd;
+    mid[i] = m;
+    upper[i] = u;
+    lower[i] = l;
+    bw[i] = m > 0 ? (u - l) / m : null;
+    pctB[i] = u !== l ? (closes[i] - l) / (u - l) : 0.5;
   }
-  if (at.bear) {
-    return { dir: 'watch', label: 'AT空·等EMA', reason: '只允许做空，等 EMA 过滤做空' };
+
+  const i = n - 1;
+  if (bw[i] == null || pctB[i] == null) return null;
+
+  const look = Math.min(20, n - period);
+  const hist = [];
+  for (let j = i - look + 1; j <= i; j++) {
+    if (bw[j] != null) hist.push(bw[j]);
   }
-  return { dir: 'watch', label: '观望', reason: 'AlphaTrend 未给出方向' };
+  const sorted = hist.slice().sort((a, b) => a - b);
+  const q20 = sorted[Math.max(0, Math.floor(sorted.length * 0.2) - 1)] ?? bw[i];
+  const q80 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.8))] ?? bw[i];
+  const bw3 = bw[i - 3];
+  const bw5 = bw[i - 5];
+  const ch3 = bw3 ? bw[i] / bw3 - 1 : 0;
+  const ch5 = bw5 ? bw[i] / bw5 - 1 : 0;
+
+  let width = 'stable';
+  let widthLabel = '宽度稳定（震荡）';
+  if (bw[i] <= q20 && ch3 <= -0.08) {
+    width = 'squeeze';
+    widthLabel = '突然闭口';
+  } else if (bw[i] <= q20) {
+    width = 'squeeze';
+    widthLabel = '闭口收窄';
+  } else if (ch3 >= 0.18 && bw3 != null && bw3 <= q80) {
+    width = 'expand';
+    widthLabel = '突然开口';
+  } else if (ch5 >= 0.12) {
+    width = 'expand';
+    widthLabel = '开口扩大';
+  } else if (ch5 <= -0.12) {
+    width = 'squeeze';
+    widthLabel = '持续收口';
+  } else if (Math.abs(ch5) < 0.08) {
+    width = 'stable';
+    widthLabel = '宽度稳定（震荡）';
+  } else {
+    width = 'stable';
+    widthLabel = '带宽温和变化';
+  }
+
+  const p = pctB[i];
+  let zone = 'mid';
+  let zoneLabel = '中轨';
+  if (p > 1.05) { zone = 'above'; zoneLabel = '上轨外'; }
+  else if (p >= 0.85) { zone = 'upper'; zoneLabel = '贴上轨'; }
+  else if (p >= 0.6) { zone = 'upperMid'; zoneLabel = '中上'; }
+  else if (p > 0.4) { zone = 'mid'; zoneLabel = '中轨'; }
+  else if (p > 0.15) { zone = 'lowerMid'; zoneLabel = '中下'; }
+  else if (p >= 0) { zone = 'lower'; zoneLabel = '贴下轨'; }
+  else { zone = 'below'; zoneLabel = '下轨外'; }
+
+  const walkN = 3;
+  let walkUpper = true;
+  let walkLower = true;
+  for (let j = i - walkN + 1; j <= i; j++) {
+    if (pctB[j] == null || pctB[j] < 0.8) walkUpper = false;
+    if (pctB[j] == null || pctB[j] > 0.2) walkLower = false;
+  }
+
+  let hint = '';
+  if (width === 'squeeze' && (zone === 'mid' || zone === 'upperMid' || zone === 'lowerMid')) {
+    hint = '闭口蓄势，等开口方向，先不追';
+  } else if (width === 'squeeze' && (zone === 'upper' || zone === 'above')) {
+    hint = '闭口摸上轨，假突破风险大';
+  } else if (width === 'squeeze' && (zone === 'lower' || zone === 'below')) {
+    hint = '闭口探下轨，假跌破风险大';
+  } else if (width === 'expand' && walkUpper) {
+    hint = '开口沿上轨，顺势不摸头';
+  } else if (width === 'expand' && walkLower) {
+    hint = '开口沿下轨，顺势不抄底';
+  } else if (width === 'expand' && (zone === 'upper' || zone === 'above')) {
+    hint = '开口偏上，趋势跟随，回中轨再考虑多';
+  } else if (width === 'expand' && (zone === 'lower' || zone === 'below')) {
+    hint = '开口偏下，趋势跟随，反抽中轨再考虑空';
+  } else if (width === 'stable' && (zone === 'upper' || zone === 'above')) {
+    hint = '震荡上轨，可高抛等回中轨';
+  } else if (width === 'stable' && (zone === 'lower' || zone === 'below')) {
+    hint = '震荡下轨，可低吸等回中轨';
+  } else if (width === 'stable') {
+    hint = '带宽稳定，按中轨摆动高抛低吸';
+  } else {
+    hint = '观察开口方向';
+  }
+
+  return {
+    coin,
+    interval,
+    period,
+    k,
+    mid: mid[i],
+    upper: upper[i],
+    lower: lower[i],
+    bandwidth: bw[i],
+    bandwidthPct: bw[i] * 100,
+    pctB: p,
+    width,
+    widthLabel,
+    zone,
+    zoneLabel,
+    walkUpper,
+    walkLower,
+    hint,
+    label: `${widthLabel} · ${zoneLabel}`,
+  };
+}
+
+/**
+ * BOLL 中轴短线：中轨分界 + EMA6/12 + 快线斜率 + 放量阳/阴线。
+ * 斜率按价格归一：(ema6-ema6[5])/5/close 对比 0.0009，多币种可比较。
+ * 平仓脚本：跌回中轨下平多 / 升回中轨上平空；止损 1.5%。
+ */
+export function evaluateBollMidStrategy(klines, coin = '', opts = {}) {
+  const interval = opts.interval || '1h';
+  const slopeLen = 5;
+  const slopeTh = opts.slopeThreshold == null ? 0.0009 : Number(opts.slopeThreshold);
+  const volMult = opts.volMultiplier == null ? 2 : Number(opts.volMultiplier);
+  const volMaLen = 15;
+  if (!klines || klines.length < 40) return null;
+
+  const n = klines.length;
+  const open = klines.map((k) => (Array.isArray(k) ? Number(k[1]) : Number(k.o)));
+  const high = klines.map((k) => (Array.isArray(k) ? Number(k[2]) : Number(k.h)));
+  const low = klines.map((k) => (Array.isArray(k) ? Number(k[3]) : Number(k.l)));
+  const close = klines.map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c)));
+  const vol = klines.map((k) => (Array.isArray(k) ? Number(k[5]) : Number(k.v || 0)));
+
+  const emaF = calcEMA(close, 6);
+  const emaS = calcEMA(close, 12);
+  if (!emaF || !emaS) return null;
+
+  const tr = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (i === 0) tr[i] = high[i] - low[i];
+    else tr[i] = Math.max(high[i] - low[i], Math.abs(high[i] - close[i - 1]), Math.abs(low[i] - close[i - 1]));
+  }
+
+  const longFlags = new Array(n).fill(false);
+  const shortFlags = new Array(n).fill(false);
+
+  for (let i = 20; i < n; i++) {
+    let sum = 0;
+    for (let j = i - 19; j <= i; j++) sum += close[j];
+    const mid = sum / 20;
+    if (emaF[i] == null || emaS[i] == null || emaF[i - slopeLen] == null) continue;
+    const slopeAbs = (emaF[i] - emaF[i - slopeLen]) / slopeLen;
+    const slopeRel = close[i] > 0 ? slopeAbs / close[i] : 0;
+    let volMa = 0;
+    for (let j = i - volMaLen + 1; j <= i; j++) volMa += vol[j];
+    volMa /= volMaLen;
+    const volBreak = volMa > 0 && vol[i] > volMa * volMult;
+    const bullBar = close[i] > open[i];
+    const bearBar = close[i] < open[i];
+    longFlags[i] = close[i] > mid && emaF[i] > emaS[i] && slopeRel > slopeTh && volBreak && bullBar;
+    shortFlags[i] = close[i] < mid && emaF[i] < emaS[i] && slopeRel < -slopeTh && volBreak && bearBar;
+  }
+
+  const i = n - 1;
+  let mid = null;
+  {
+    let sum = 0;
+    for (let j = i - 19; j <= i; j++) sum += close[j];
+    mid = sum / 20;
+  }
+  const above = close[i] > mid;
+  const slopeAbs = (emaF[i] - emaF[i - slopeLen]) / slopeLen;
+  const slopeRel = close[i] > 0 ? slopeAbs / close[i] : 0;
+  let volMa = 0;
+  for (let j = i - volMaLen + 1; j <= i; j++) volMa += vol[j];
+  volMa /= volMaLen;
+  const volRatio = volMa > 0 ? vol[i] / volMa : 0;
+
+  let atrNow = null;
+  let atrMax = null;
+  if (i >= 14) {
+    let s = 0;
+    for (let j = i - 13; j <= i; j++) s += tr[j];
+    atrNow = s / 14;
+    atrMax = atrNow;
+    for (let j = i - 14; j <= i; j++) {
+      if (j < 13) continue;
+      let a = 0;
+      for (let t = j - 13; t <= j; t++) a += tr[t];
+      a /= 14;
+      if (a > atrMax) atrMax = a;
+    }
+  }
+  const squeezeRatio = atrNow && atrMax ? atrNow / atrMax : null;
+
+  let lastLong = null;
+  let lastShort = null;
+  for (let j = i; j >= 20; j--) {
+    if (lastLong == null && longFlags[j]) lastLong = i - j;
+    if (lastShort == null && shortFlags[j]) lastShort = i - j;
+    if (lastLong != null && lastShort != null) break;
+  }
+
+  const longNow = longFlags[i];
+  const shortNow = shortFlags[i];
+  let setup = 'watch';
+  let setupLabel = '中轴观望';
+  if (longNow) { setup = 'long'; setupLabel = '中轴做多'; }
+  else if (shortNow) { setup = 'short'; setupLabel = '中轴做空'; }
+
+  const missing = [];
+  if (above) {
+    if (!(emaF[i] > emaS[i])) missing.push('EMA6未在12上');
+    if (!(slopeRel > slopeTh)) missing.push('快线斜率不够');
+    if (!(volRatio > volMult)) missing.push(`量能 ${volRatio.toFixed(2)}x < ${volMult}x`);
+    if (!(close[i] > open[i])) missing.push('非阳线');
+  } else {
+    if (!(emaF[i] < emaS[i])) missing.push('EMA6未在12下');
+    if (!(slopeRel < -slopeTh)) missing.push('快线斜率不够');
+    if (!(volRatio > volMult)) missing.push(`量能 ${volRatio.toFixed(2)}x < ${volMult}x`);
+    if (!(close[i] < open[i])) missing.push('非阴线');
+  }
+
+  const lastLabel = lastLong != null && (lastShort == null || lastLong <= lastShort)
+    ? `上次做多 ${formatAgo(lastLong, interval)}`
+    : lastShort != null
+      ? `上次做空 ${formatAgo(lastShort, interval)}`
+      : '尚无中轴开仓';
+
+  const exitHint = above ? '多单：跌回中轨下考虑平' : '空单：升回中轨上考虑平';
+
+  return {
+    coin,
+    interval,
+    setup,
+    setupLabel,
+    aboveMid: above,
+    mid,
+    ema6: emaF[i],
+    ema12: emaS[i],
+    slopeRel,
+    volRatio,
+    volBreak: volRatio > volMult,
+    squeezeRatio,
+    longNow,
+    shortNow,
+    lastLongAgo: lastLong,
+    lastShortAgo: lastShort,
+    lastLabel,
+    missing: setup === 'watch' ? missing : [],
+    exitHint,
+    stopPct: 1.5,
+    hint: longNow
+      ? `中轨上+EMA6/12多头+放量阳线，中轴做多。止损 1.5%，${exitHint}`
+      : shortNow
+        ? `中轨下+EMA6/12空头+放量阴线，中轴做空。止损 1.5%，${exitHint}`
+        : `中轴未开仓（${missing.slice(0, 2).join('，') || '条件未齐'}）。${exitHint}`,
+  };
 }
 
 export function attachAlphaTrend(ema, klines, opts = {}) {
   if (!ema) return null;
   const at = evaluateAlphaTrend(klines, ema.coin, opts);
   ema.alpha = at;
-  ema.combined = combineEmaAlpha(ema, at);
+  ema.bb = evaluateBollinger(klines, ema.coin, opts);
+  ema.bollMid = evaluateBollMidStrategy(klines, ema.coin, opts);
+  ema.combined = combineEmaAlpha(ema, at, ema.bb);
   return ema;
 }
 

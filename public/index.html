@@ -42,7 +42,9 @@
           <strong>上穿/下穿56</strong>只是穿越标记，不是开仓。
           <strong>做多/做空</strong>才叠加 MACD 0 轴 + RSI6 过滤。
           <strong>AlphaTrend</strong>当方向开关（绿只允许多、红只允许空）。
-          <strong>共振开仓</strong> = AT 方向 ∩ EMA 过滤做多/做空。
+          <strong>共振开仓</strong> = AT 方向 ∩ EMA 过滤做多/做空；<strong>突然开口</strong>视为新趋势有利条件，<strong>闭口</strong>则暂缓开仓。
+          <strong>布林(20,2)</strong>：闭口蓄势、开口顺势；宽度稳定时上轨高抛、下轨低吸。
+          <strong>中轴开仓</strong>：价在中轨上/下 + EMA6/12 同向 + 快线斜率 + 放量阳/阴线；回中轨考虑平仓，止损 1.5%。
         </div>
       </div>
       <div class="ema-table-wrap">
@@ -55,11 +57,13 @@
               <th>发生时间</th>
               <th>过滤开仓</th>
               <th>AlphaTrend</th>
+              <th>布林</th>
+              <th>中轴</th>
               <th>共振</th>
             </tr>
           </thead>
           <tbody id="emaTableBody">
-            <tr><td colspan="7" class="empty">正在计算 15m / 1h EMA + AlphaTrend...</td></tr>
+            <tr><td colspan="9" class="empty">正在计算 15m / 1h 策略...</td></tr>
           </tbody>
         </table>
       </div>

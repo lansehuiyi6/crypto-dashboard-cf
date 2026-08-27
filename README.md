@@ -83,6 +83,10 @@ WORKER_URL=http://127.0.0.1:8787 CRON_SECRET=dev npm run scan
 CRON_SECRET=dev
 ```
 
+## 短线策略说明
+
+EMA7/21/56、AlphaTrend（ATR）、布林带宽/%B、BOLL 中轴开仓，见 [docs/STRATEGIES.md](docs/STRATEGIES.md)。
+
 ## API
 
 | 路径 | 说明 |
@@ -93,6 +97,8 @@ CRON_SECRET=dev
 | `/api/valuescan/*` | 优先读快照 |
 | `/api/signals` | 读已发布信号 |
 | `/api/market-signals` | 短线操作面板（支撑/阻力随现价生成） |
+| `/api/ema-strategy` | 15m/1h EMA+AT+布林（页面优先浏览器直连币安，此接口兜底） |
+| `/api/overview` | 总市值、BTC.D / ETH.D / USDT.D |
 
 ## 注意事项
 
