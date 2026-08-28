@@ -37,35 +37,19 @@
 
     <section class="ema-board" id="emaBoard">
       <div class="ema-board-header">
-        <h2>EMA7/21/56 策略 <span class="ema-badge">15m / 1h</span></h2>
+        <h2>EMA7/21/56 策略 <span class="ema-badge">15m / 1h · MK+4h/1d</span></h2>
         <div class="ema-board-desc">
           <strong>上穿/下穿56</strong>只是穿越标记，不是开仓。
           <strong>做多/做空</strong>才叠加 MACD 0 轴 + RSI6 过滤。
           <strong>AlphaTrend</strong>当方向开关（绿只允许多、红只允许空）。
-          <strong>共振开仓</strong> = AT 方向 ∩ EMA 过滤做多/做空；<strong>突然开口</strong>视为新趋势有利条件，<strong>闭口</strong>则暂缓开仓。
-          <strong>布林(20,2)</strong>：闭口蓄势、开口顺势；宽度稳定时上轨高抛、下轨低吸。
-          <strong>中轴开仓</strong>：价在中轨上/下 + EMA6/12 同向 + 快线斜率 + 放量阳/阴线；回中轨考虑平仓，止损 1.5%。
+          <strong>共振开仓</strong> = AT 方向 ∩（EMA 过滤 或 中轴触发）；<strong>突然开口</strong>视为新趋势有利条件，<strong>闭口</strong>则暂缓开仓。
+          <strong>布林(20,2)</strong>：闭口蓄势、开口顺势；宽度稳定时上轨高抛、下轨低吸。卡片直接给出上/中/下轨。
+          <strong>中轴开仓</strong>：价在中轨上/下 + EMA6/12 同向 + 快线斜率 + 放量（≥1.4×均量）阳/阴线；回中轨考虑平仓，止损 1.5%。
+          <strong>MACD+KDJ</strong>：15m/1h 执行（柱&gt;0 且 DIF&gt;DEA 入场；K/D/J 全&gt;80 离场）；<strong>4h</strong> 作顺势/逆势背景，<strong>1d</strong> 只作文案环境。离场≠反手做空。
         </div>
       </div>
-      <div class="ema-table-wrap">
-        <table class="data-table ema-table" id="emaTable">
-          <thead>
-            <tr>
-              <th>品种</th>
-              <th>周期</th>
-              <th>最近穿越</th>
-              <th>发生时间</th>
-              <th>过滤开仓</th>
-              <th>AlphaTrend</th>
-              <th>布林</th>
-              <th>中轴</th>
-              <th>共振</th>
-            </tr>
-          </thead>
-          <tbody id="emaTableBody">
-            <tr><td colspan="9" class="empty">正在计算 15m / 1h 策略...</td></tr>
-          </tbody>
-        </table>
+      <div class="ema-cards" id="emaCards">
+        <div class="empty">正在计算 15m / 1h 策略...</div>
       </div>
       <div class="ema-board-note" id="emaBoardNote"></div>
       <div class="usdt-d-box" id="usdtDBox"></div>
@@ -190,61 +174,6 @@
         </div>
       </div>
     </section>
-
-    <div class="lower-grid">
-      <div class="panel">
-        <div class="panel-header">
-          <h2>代币解锁日历 (抛压风险)</h2>
-        </div>
-        <div class="panel-body">
-          <table class="data-table" id="unlockTable">
-            <thead>
-              <tr><th>代币</th><th>日期</th><th>金额</th><th>占比</th><th>风险</th></tr>
-            </thead>
-            <tbody id="unlockBody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <h2>热门代币 & 趋势</h2>
-        </div>
-        <div class="panel-body">
-          <table class="data-table">
-            <thead>
-              <tr><th>代币</th><th>涨幅</th><th>标签</th><th>备注</th></tr>
-            </thead>
-            <tbody id="trendingBody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <h2>新币上线</h2>
-        </div>
-        <div class="panel-body">
-          <table class="data-table">
-            <thead>
-              <tr><th>代币</th><th>交易所</th><th>状态</th></tr>
-            </thead>
-            <tbody id="listingBody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <h2>核心叙事 & 关键事件</h2>
-        </div>
-        <div class="panel-body">
-          <div id="narrativeList"></div>
-          <h3 class="sub-title">关键事件</h3>
-          <div id="eventList"></div>
-        </div>
-      </div>
-    </div>
 
     <footer class="footer">
       <p>价格与 EMA 策略由浏览器直连币安；自有信号引擎 / ValueScan 由定时扫描写入。仅供参考, 不构成投资建议</p>

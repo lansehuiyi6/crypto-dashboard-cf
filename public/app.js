@@ -1,9 +1,13 @@
 import {
   STRATEGY_SYMBOLS,
   evaluateEmaTrendStrategy,
+  evaluateMacdKdjSignal,
+  annotateMacdKdjContext,
   attachAlphaTrend,
   toDominanceKlines,
   INTERVAL_MS,
+  EXEC_INTERVALS,
+  HTF_INTERVALS,
 } from './ema-core.js';
 
 
@@ -111,6 +115,105 @@ async function fetchBinancePricesClient() {
   return out;
 }
 
+const LS_KLINE = 'cd:kl:';
+const LS_USDTD = 'cd:usdtd';
+const USDTD_TTL_MS = 15 * 60 * 1000;
+const KLINE_STALE_MAX_MS = 30 * 60 * 1000;
+
+function lsGet(key, maxAgeMs) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || typeof o.ts !== 'number' || o.data == null) return null;
+    if (Date.now() - o.ts > maxAgeMs) return null;
+    return o.data;
+  } catch {
+    return null;
+  }
+}
+
+function lsSet(key, data) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+  } catch { /* quota / private mode */ }
+}
+
+function klineFreshMs(interval) {
+  if (interval === '15m') return 90 * 1000;
+  if (interval === '1h') return 4 * 60 * 1000;
+  if (interval === '4h') return 20 * 60 * 1000;
+  if (interval === '1d') return 2 * 60 * 60 * 1000;
+  return 4 * 60 * 1000;
+}
+
+function emptyBoard() {
+  return {
+    '15m': {},
+    '1h': {},
+    '4h': {},
+    '1d': {},
+    usdtD: {},
+    source: 'browser',
+    fetchedAt: Date.now(),
+    errors: [],
+    cached: false,
+  };
+}
+
+function rowFromKlines(klines, coin, interval) {
+  const row = evaluateEmaTrendStrategy(klines, coin, { interval });
+  return row ? attachAlphaTrend(row, klines, { interval }) : null;
+}
+
+function macdKdjFromKlines(klines, coin, interval) {
+  return evaluateMacdKdjSignal(klines, coin, { interval });
+}
+
+function enrichBoardMacdKdj(board) {
+  for (const tf of EXEC_INTERVALS) {
+    for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+      const row = board[tf] && board[tf][coin];
+      if (!row || !row.macdKdj) continue;
+      row.macdKdjView = annotateMacdKdjContext(row.macdKdj, board['4h']?.[coin], board['1d']?.[coin]);
+    }
+  }
+}
+
+function hydrateBoardFromCache(board) {
+  let hits = 0;
+  for (const [coin, symbol] of Object.entries(STRATEGY_SYMBOLS)) {
+    for (const interval of EXEC_INTERVALS) {
+      const cached = lsGet(LS_KLINE + symbol + ':' + interval, KLINE_STALE_MAX_MS);
+      if (!cached) continue;
+      try {
+        const row = rowFromKlines(cached, coin, interval);
+        if (row) {
+          board[interval][coin] = row;
+          hits += 1;
+        }
+      } catch { /* ignore bad cache */ }
+    }
+    for (const interval of HTF_INTERVALS) {
+      const maxAge = interval === '1d' ? 6 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000;
+      const cached = lsGet(LS_KLINE + symbol + ':' + interval, maxAge);
+      if (!cached) continue;
+      try {
+        const mk = macdKdjFromKlines(cached, coin, interval);
+        if (mk) {
+          board[interval][coin] = mk;
+          hits += 1;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  enrichBoardMacdKdj(board);
+  const usdtd = lsGet(LS_USDTD, 60 * 60 * 1000);
+  if (usdtd) board.usdtD = usdtd;
+  if (hits) board.cached = true;
+  return hits;
+}
+
 async function fetchKlinesClient(symbol, interval) {
   const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
   const hosts = [
@@ -131,27 +234,15 @@ async function fetchKlinesClient(symbol, interval) {
   throw new Error('klines ' + symbol);
 }
 
-async function fetchBoardInBrowser() {
-  const board = { '15m': {}, '1h': {}, usdtD: {}, source: 'browser', fetchedAt: Date.now(), errors: [] };
-  await Promise.all(['15m', '1h'].flatMap((interval) =>
-    Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
-      try {
-        const klines = await fetchKlinesClient(symbol, interval);
-        const row = evaluateEmaTrendStrategy(klines, coin, { interval });
-        board[interval][coin] = row ? attachAlphaTrend(row, klines, { interval }) : null;
-        if (!board[interval][coin]) board.errors.push(coin + ' ' + interval + ': 指标不足');
-      } catch (e) {
-        board[interval][coin] = null;
-        board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
-      }
-    }),
-  ));
-  try {
-    board.usdtD = await fetchUsdtDInBrowser();
-  } catch (e) {
-    board.errors.push('USDT.D: ' + (e.message || e));
+async function getKlinesCached(symbol, interval, force) {
+  const key = LS_KLINE + symbol + ':' + interval;
+  if (!force) {
+    const hit = lsGet(key, klineFreshMs(interval));
+    if (hit) return hit;
   }
-  return board;
+  const klines = await fetchKlinesClient(symbol, interval);
+  lsSet(key, klines);
+  return klines;
 }
 
 async function fetchCgMcaps(id, days) {
@@ -321,13 +412,151 @@ function bbHtml(bb) {
   const cls = bb.width === 'expand'
     ? (bb.zone === 'lower' || bb.zone === 'below' ? 'short' : 'long')
     : 'watch';
-  return `<span class="strategy-tag ${cls}" title="${bb.hint || ''}">${bb.label}</span>`;
+  return `<span class="strategy-tag ${cls}" title="${escAttr(bb.hint || '')}">${bb.label}</span>`;
 }
 
 function bollMidHtml(bm) {
   if (!bm) return '<span class="strategy-tag watch">--</span>';
   const cls = bm.setup === 'long' ? 'long' : bm.setup === 'short' ? 'short' : 'watch';
-  return `<span class="strategy-tag ${cls}" title="${bm.hint || ''}">${bm.setupLabel}</span> ${bm.lastLabel || ''}`;
+  return `<span class="strategy-tag ${cls}" title="${escAttr(bm.hint || '')}">${bm.setupLabel}</span> ${bm.lastLabel || ''}`;
+}
+
+function macdKdjActionClass(view) {
+  if (!view) return 'watch';
+  if (view.action === 'entry') return 'long';
+  if (view.action === 'exit' || view.action === 'overbought') return 'short';
+  if (view.action === 'counter') return 'watch';
+  if (view.action === 'hold' && view.bias === 'with') return 'long';
+  if (view.action === 'hold' && view.bias === 'against') return 'watch';
+  return 'watch';
+}
+
+function macdKdjHtml(view) {
+  if (!view) return '<span class="strategy-tag watch">--</span>';
+  const cls = macdKdjActionClass(view);
+  const hist = Number.isFinite(view.hist) ? view.hist.toPrecision(3) : '--';
+  const k = Number.isFinite(view.k) ? view.k.toFixed(0) : '--';
+  const d = Number.isFinite(view.d) ? view.d.toFixed(0) : '--';
+  const j = Number.isFinite(view.j) ? view.j.toFixed(0) : '--';
+  const edge = view.buyEdge && view.lastBuy
+    ? `买 ${view.lastBuy.timeAgoText}`
+    : view.sellEdge && view.lastSell
+      ? `卖 ${view.lastSell.timeAgoText}`
+      : '';
+  return `<span class="strategy-tag ${cls}" title="${escAttr(view.reason || '')}">${view.actionLabel}</span> Hist ${hist} · KDJ ${k}/${d}/${j}${edge ? ' · ' + edge : ''}`;
+}
+
+function macdKdjBgHtml(board, coin) {
+  const h4 = board && board['4h'] && board['4h'][coin];
+  const d1 = board && board['1d'] && board['1d'][coin];
+  const c4 = !h4 ? 'watch' : h4.overbought ? 'short' : h4.macdBull ? 'long' : 'watch';
+  const c1 = !d1 ? 'watch' : d1.overbought ? 'short' : d1.macdBull ? 'long' : 'watch';
+  const label4 = !h4 ? '4h--' : h4.overbought ? '4h超买' : h4.macdBull ? '4h多头' : '4h空头';
+  const label1 = !d1 ? '1d--' : d1.overbought ? '1d超买' : d1.macdBull ? '1d多头' : '1d空头';
+  const t4 = h4
+    ? `${label4} · Hist ${Number.isFinite(h4.hist) ? h4.hist.toPrecision(3) : '--'} · KDJ ${Number.isFinite(h4.k) ? h4.k.toFixed(0) : '--'}/${Number.isFinite(h4.d) ? h4.d.toFixed(0) : '--'}/${Number.isFinite(h4.j) ? h4.j.toFixed(0) : '--'}`
+    : '4h 背景未就绪';
+  const t1 = d1
+    ? `${label1} · ${d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线非多头环境'}`
+    : '1d 背景未就绪';
+  return `<div class="mk-bg">
+    <span class="mk-bg-label">背景</span>
+    <span class="strategy-tag ${c4}" title="4h 作顺势/逆势过滤">${t4}</span>
+    <span class="strategy-tag ${c1}" title="1d 只作文案环境，不当日内出场">${t1}</span>
+  </div>`;
+}
+
+function macdKdjHeadline(view) {
+  if (!view) return '<span class="strategy-tag watch">MK --</span>';
+  const cls = macdKdjActionClass(view);
+  return `<span class="strategy-tag ${cls}" title="${escAttr(view.reason || '')}">MK ${view.actionLabel}</span>`;
+}
+
+function fmtBand(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '--';
+  if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (n >= 1) return n.toFixed(2);
+  return n.toFixed(4);
+}
+
+function bbRailsHtml(bb) {
+  if (!bb) return '';
+  return `<div class="bb-rails">
+    <span class="rail-up">上 ${fmtBand(bb.upper)}</span>
+    <span class="rail-mid">中 ${fmtBand(bb.mid)}</span>
+    <span class="rail-dn">下 ${fmtBand(bb.lower)}</span>
+    <span class="rail-pb">%B ${Number.isFinite(bb.pctB) ? bb.pctB.toFixed(2) : '--'}</span>
+  </div>`;
+}
+
+function escAttr(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;');
+}
+
+function renderEmaTfCol(tf, row) {
+  if (!row || !row.lastSignal) {
+    return `<div class="ema-tf-col"><span class="ema-tf">${tf}</span><div class="empty">K线未返回</div></div>`;
+  }
+  const ls = row.lastSignal;
+  const c = row.combined;
+  const reason = escAttr((c && c.reason) || '');
+  const mk = row.macdKdjView || row.macdKdj;
+  return `<div class="ema-tf-col" title="${reason}">
+    <div class="ema-line"><span class="ema-tf">${tf}</span> ${combinedHtml(row)}</div>
+    <div class="ema-line">穿越 ${emaCrossHtml(ls)} ${ls.timeAgoText || ''}</div>
+    <div class="ema-line">过滤 ${emaFilterText(row)}</div>
+    <div class="ema-line">AT ${alphaHtml(row.alpha)}</div>
+    <div class="ema-line">布林 ${bbHtml(row.bb)}</div>
+    ${bbRailsHtml(row.bb)}
+    <div class="ema-line">中轴 ${bollMidHtml(row.bollMid)}</div>
+    <div class="ema-line">MACD+KDJ ${macdKdjHtml(mk)}</div>
+    ${mk && mk.reason ? `<div class="ema-hint">${mk.reason}</div>` : ''}
+    ${row.bb && row.bb.hint ? `<div class="ema-hint">${row.bb.hint}</div>` : ''}
+  </div>`;
+}
+
+function renderEmaCards(data) {
+  const box = document.getElementById('emaCards');
+  if (!box) return;
+  const coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
+  box.innerHTML = coins.map((coin) => {
+    const r15 = data && data['15m'] && data['15m'][coin];
+    const r1h = data && data['1h'] && data['1h'][coin];
+    const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || '';
+    const mk15 = r15 && (r15.macdKdjView || r15.macdKdj);
+    const mk1h = r1h && (r1h.macdKdjView || r1h.macdKdj);
+    return `<article class="ema-coin-card">
+      <div class="ema-coin-head">
+        <div>
+          <h3>${coin}</h3>
+          ${px ? `<div class="ema-coin-price">${px}</div>` : ''}
+        </div>
+        <div class="ema-headlines">
+          <span>${combinedHtml(r15)} <span class="ema-tf">15m</span></span>
+          <span>${combinedHtml(r1h)} <span class="ema-tf">1h</span></span>
+          <span>${macdKdjHeadline(mk15)} <span class="ema-tf">15m</span></span>
+          <span>${macdKdjHeadline(mk1h)} <span class="ema-tf">1h</span></span>
+        </div>
+      </div>
+      ${macdKdjBgHtml(data, coin)}
+      <div class="ema-tf-cols">
+        ${renderEmaTfCol('15m', r15)}
+        ${renderEmaTfCol('1h', r1h)}
+      </div>
+    </article>`;
+  }).join('');
+}
+
+function paintEmaBoard(data) {
+  if (data) enrichBoardMacdKdj(data);
+  lastEmaBoard = data;
+  renderEmaCards(data);
+  renderShortSignalCards();
+  renderUsdtDBox(data && data.usdtD);
 }
 
 function renderUsdtDBox(usdtD) {
@@ -350,65 +579,124 @@ function renderUsdtDBox(usdtD) {
   `;
 }
 
-async function loadEmaStrategy() {
-  const body = document.getElementById('emaTableBody');
+function emaBoardFilled(data) {
+  if (!data) return 0;
+  let n = 0;
+  for (const tf of ['15m', '1h']) {
+    for (const row of Object.values(data[tf] || {})) {
+      if (row && row.lastSignal) n += 1;
+    }
+  }
+  return n;
+}
+
+function setEmaNote(data) {
   const note = document.getElementById('emaBoardNote');
+  if (!note) return;
+  const filled = emaBoardFilled(data);
+  const src = data && data.cached && data.source === 'browser'
+    ? '本地缓存 · 后台刷新币安'
+    : data && data.source === 'browser' ? '浏览器直连币安'
+    : data && data.source === 'live' ? 'Worker 拉取'
+    : data && data.source === 'snapshot' ? '扫描快照'
+    : '无K线';
+  const when = data && data.fetchedAt ? fmtTime(data.fetchedAt) : '';
+  const err = Array.isArray(data && data.errors) && data.errors.length
+    ? data.errors.slice(0, 3).join('；')
+    : '';
+  note.textContent = filled
+    ? `${src} ${when}`
+    : `K线拉取失败${err ? '：' + err : '。Worker 访问币安被拦时，等 GitHub Actions 扫描写入后再刷新。'}`;
+}
+
+async function loadUsdtD(board, force) {
+  if (!force) {
+    const hit = lsGet(LS_USDTD, USDTD_TTL_MS);
+    if (hit) {
+      board.usdtD = hit;
+      renderUsdtDBox(hit);
+      return;
+    }
+  }
   try {
-    let data;
-    try {
-      data = await fetchBoardInBrowser();
-      if (!boardHasClientRows(data)) throw new Error('browser klines empty');
-    } catch (e) {
-      console.warn('browser klines fallback to worker', e.message);
-      data = await fetchJSON('/api/ema-strategy');
-    }
-    lastEmaBoard = data;
-    renderShortSignalCards();
-    const coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
-    const html = [];
-    let filled = 0;
-    for (const coin of coins) {
-      for (const tf of ['15m', '1h']) {
-        const row = data[tf] && data[tf][coin];
-        if (!row || !row.lastSignal) {
-          html.push(`<tr><td>${coin}</td><td><span class="ema-tf">${tf}</span></td><td colspan="7" class="empty">K线未返回</td></tr>`);
-          continue;
+    const data = await fetchUsdtDInBrowser();
+    board.usdtD = data;
+    lsSet(LS_USDTD, data);
+    renderUsdtDBox(data);
+  } catch (e) {
+    board.errors.push('USDT.D: ' + (e.message || e));
+    if (!board.usdtD || (!board.usdtD['1h'] && !board.usdtD['15m'])) renderUsdtDBox(null);
+  }
+}
+
+async function loadEmaStrategy(force = false) {
+  const note = document.getElementById('emaBoardNote');
+  const board = emptyBoard();
+  const cachedHits = hydrateBoardFromCache(board);
+  if (cachedHits) {
+    paintEmaBoard(board);
+    setEmaNote(board);
+  }
+
+  try {
+    const execJobs = EXEC_INTERVALS.flatMap((interval) =>
+      Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
+        try {
+          const klines = await getKlinesCached(symbol, interval, force);
+          const row = rowFromKlines(klines, coin, interval);
+          board[interval][coin] = row;
+          if (!row) board.errors.push(coin + ' ' + interval + ': 指标不足');
+          board.cached = false;
+          board.fetchedAt = Date.now();
+          paintEmaBoard(board);
+        } catch (e) {
+          if (!board[interval][coin]) {
+            board[interval][coin] = null;
+            board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+          }
         }
-        filled += 1;
-        const ls = row.lastSignal;
-        html.push(`<tr>
-          <td>${coin}</td>
-          <td><span class="ema-tf">${tf}</span></td>
-          <td>${emaCrossHtml(ls)}</td>
-          <td>${ls ? ls.timeAgoText : '--'}</td>
-          <td>${emaFilterText(row)}</td>
-          <td>${alphaHtml(row.alpha)}</td>
-          <td>${bbHtml(row.bb)}</td>
-          <td>${bollMidHtml(row.bollMid)}</td>
-          <td title="${(row.combined && row.combined.reason) || ''}">${combinedHtml(row)}</td>
-        </tr>`);
+      }),
+    );
+    const htfJobs = HTF_INTERVALS.flatMap((interval) =>
+      Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
+        try {
+          const klines = await getKlinesCached(symbol, interval, force);
+          const mk = macdKdjFromKlines(klines, coin, interval);
+          board[interval][coin] = mk;
+          if (!mk) board.errors.push(coin + ' ' + interval + ': MACD+KDJ 不足');
+          board.cached = false;
+          board.fetchedAt = Date.now();
+          paintEmaBoard(board);
+        } catch (e) {
+          if (!board[interval][coin]) {
+            board[interval][coin] = null;
+            board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+          }
+        }
+      }),
+    );
+    await Promise.all([...execJobs, ...htfJobs]);
+
+    if (!boardHasClientRows(board)) {
+      try {
+        const fallback = await fetchJSON('/api/ema-strategy');
+        paintEmaBoard(fallback);
+        setEmaNote(fallback);
+      } catch (e) {
+        console.warn('browser klines fallback to worker', e.message);
+        setEmaNote(board);
       }
-    }
-    if (body) body.innerHTML = html.join('');
-    renderUsdtDBox(data.usdtD);
-    const src = data.source === 'browser' ? '浏览器直连币安'
-      : data.source === 'live' ? 'Worker 拉取'
-      : data.source === 'snapshot' ? '扫描快照'
-      : '无K线';
-    const when = data.fetchedAt ? fmtTime(data.fetchedAt) : '';
-    const err = Array.isArray(data.errors) && data.errors.length
-      ? data.errors.slice(0, 3).join('；')
-      : '';
-    if (note) {
-      note.textContent = filled
-        ? `${src} ${when}`
-        : `K线拉取失败${err ? '：' + err : '。Worker 访问币安被拦时，等 GitHub Actions 扫描写入后再刷新。'}`;
+    } else {
+      setEmaNote(board);
     }
   } catch (e) {
     console.warn('EMA strategy fetch failed:', e.message);
-    if (body) body.innerHTML = '<tr><td colspan="7" class="empty">EMA 策略接口失败，稍后重试</td></tr>';
+    const box = document.getElementById('emaCards');
+    if (box && !cachedHits) box.innerHTML = '<div class="empty">EMA 策略接口失败，稍后重试</div>';
     if (note) note.textContent = e.message || 'fetch failed';
   }
+
+  loadUsdtD(board, force);
 }
 
 async function fetchOverview() {
@@ -692,49 +980,6 @@ async function loadMarketSignals() {
     const data = await fetchJSON('/api/market-signals');
     lastShortSignals = data.tradingSignals || [];
     renderShortSignalCards();
-
-    document.getElementById('unlockBody').innerHTML = data.tokenUnlocks.map(u => `
-      <tr>
-        <td>${u.token}</td>
-        <td>${u.date}</td>
-        <td>${u.amount}</td>
-        <td>${u.pct}</td>
-        <td><span class="risk-tag risk-${u.risk}">${u.risk === 'extreme' ? '极高' : u.risk === 'high' ? '高' : u.risk === 'medium' ? '中' : '低'}</span></td>
-      </tr>
-    `).join('');
-
-    document.getElementById('trendingBody').innerHTML = data.trendingTokens.map(t => `
-      <tr>
-        <td>${t.token}</td>
-        <td style="color:${t.change.startsWith('+') ? 'var(--up)' : 'var(--text-secondary)'};font-weight:600;">${t.change}</td>
-        <td><span class="tag-label tag-${t.tag === 'DeFi' ? 'defi' : t.tag === 'AI' ? 'ai' : t.tag === 'meme' ? 'meme' : 'other'}">${t.tag}</span></td>
-        <td style="font-size:12px;color:var(--text-secondary);">${t.note}</td>
-      </tr>
-    `).join('');
-
-    document.getElementById('listingBody').innerHTML = data.newListings.map(l => `
-      <tr>
-        <td>${l.token}</td>
-        <td>${l.exchange}</td>
-        <td><span class="risk-tag risk-low">${l.status}</span></td>
-      </tr>
-    `).join('');
-
-    document.getElementById('narrativeList').innerHTML = data.narratives.map(n => `
-      <div class="narrative-item">
-        <div class="narrative-name">${n.name}</div>
-        <div class="narrative-tokens">${n.tokens}</div>
-        <div class="narrative-desc">${n.desc}</div>
-      </div>
-    `).join('');
-
-    document.getElementById('eventList').innerHTML = data.keyEvents.map(e => `
-      <div class="event-item">
-        <span class="event-name">${e.event}</span>
-        <span class="event-time">${e.time}</span>
-        <span class="event-impact">${e.impact}</span>
-      </div>
-    `).join('');
 
   } catch (e) {
     console.warn('Market signals fetch failed:', e.message);
@@ -1099,30 +1344,28 @@ function updateTimestamp() {
   document.getElementById('lastUpdate').textContent = '更新于 ' + now;
 }
 
-async function refreshAll() {
-  await Promise.all([
-    fetchCoinGeckoPrices(),
-    fetchGoldPrice(),
-    fetchOverview(),
-    loadEmaStrategy(),
-    loadValuescanData(),
-    loadMarketSignals(),
-    loadOwnSignals(),
-    loadReversalSignals(),
-    loadBottomReversalSignals(),
-  ]);
+function refreshAll(force = false) {
+  fetchCoinGeckoPrices();
+  loadEmaStrategy(force);
+  fetchGoldPrice();
+  fetchOverview();
+  loadValuescanData();
+  loadMarketSignals();
+  loadOwnSignals();
+  loadReversalSignals();
+  loadBottomReversalSignals();
 }
 
 document.getElementById('refreshBtn').addEventListener('click', () => {
   lastSignalData = null; // 强制刷新信号
-  refreshAll();
+  refreshAll(true);
 });
 
 refreshAll();
 setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
 setInterval(fetchOverview, 60000);
-setInterval(loadEmaStrategy, 60000);
+setInterval(() => loadEmaStrategy(false), 60000);
 setInterval(loadValuescanData, 180000);
 setInterval(() => loadOwnSignals(), 300000); // 信号引擎每5分钟刷新
 setInterval(() => loadReversalSignals(), 300000); // 反转信号每5分钟刷新

@@ -241,7 +241,10 @@ async function handleApi(request, env, ctx) {
     const cached = normalizeBoard(snap.strategies?.data);
     const usdtD = snap.global?.data?.usdtDominance;
     try {
-      const live = await fetchStrategyBoard(usdtD, { includeUsdtD: false, intervals: ['15m', '1h'] });
+      const live = await fetchStrategyBoard(usdtD, {
+        includeUsdtD: false,
+        intervals: ['15m', '1h', '4h', '1d'],
+      });
       const merged = mergeBoards(live, cached);
       if (boardHasRows(merged)) {
         return json({

@@ -14,8 +14,15 @@ const RSI_MAX = 65;
 const RSI_MIN = 30;
 const STOP_PCT = 2;
 const TAKE_PCT = 4;
-export const INTERVAL_MS = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000 };
+export const INTERVAL_MS = {
+  '15m': 15 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
+  '1d': 24 * 60 * 60 * 1000,
+};
 const SETUP_LOOKBACK = { '15m': 16, '1h': 12 };
+export const EXEC_INTERVALS = ['15m', '1h'];
+export const HTF_INTERVALS = ['4h', '1d'];
 
 export function resampleLast(points, bucketMs) {
   const buckets = new Map();
@@ -118,10 +125,18 @@ function findLastCross(fast, slow, from) {
   return null;
 }
 
+function barMinutes(interval) {
+  if (interval === '15m') return 15;
+  if (interval === '1h') return 60;
+  if (interval === '4h') return 240;
+  if (interval === '1d') return 1440;
+  return 60;
+}
+
 function formatAgo(barsAgo, interval) {
   if (barsAgo == null) return '--';
   if (barsAgo === 0) return '当前K线';
-  const minutes = interval === '15m' ? barsAgo * 15 : barsAgo * 60;
+  const minutes = barsAgo * barMinutes(interval);
   if (minutes < 60) return `${minutes} 分钟前（${barsAgo}根${interval}）`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
@@ -132,6 +147,297 @@ function formatAgo(barsAgo, interval) {
   }
   const days = Math.floor(hours / 24);
   return `${days} 天前（${barsAgo}根${interval}）`;
+}
+
+/** pandas ewm(alpha=…, adjust=False).mean() — first finite value is the seed */
+function calcEwmAlpha(values, alpha) {
+  if (!values || !values.length) return null;
+  const a = Math.min(Math.max(Number(alpha) || 0, 0), 1);
+  const out = new Array(values.length).fill(null);
+  let prev = null;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v)) continue;
+    if (prev == null) prev = v;
+    else prev = a * v + (1 - a) * prev;
+    out[i] = prev;
+  }
+  return out;
+}
+
+/** pandas ewm(span=…, adjust=False).mean() */
+function calcEwmSpan(values, span) {
+  const s = Math.max(Number(span) || 1, 1);
+  return calcEwmAlpha(values, 2 / (s + 1));
+}
+
+function rollingExtremum(values, period, mode) {
+  const n = values.length;
+  const out = new Array(n).fill(null);
+  const p = Math.max(Number(period) || 1, 1);
+  for (let i = p - 1; i < n; i++) {
+    let ext = mode === 'max' ? -Infinity : Infinity;
+    let ok = true;
+    for (let j = i - p + 1; j <= i; j++) {
+      const v = values[j];
+      if (!Number.isFinite(v)) {
+        ok = false;
+        break;
+      }
+      ext = mode === 'max' ? Math.max(ext, v) : Math.min(ext, v);
+    }
+    out[i] = ok ? ext : null;
+  }
+  return out;
+}
+
+function findLastTrue(flags, from) {
+  for (let i = from; i >= 0; i--) {
+    if (flags[i]) return i;
+  }
+  return null;
+}
+
+/**
+ * MACD + KDJ Signal
+ * Buy when MACD hist > 0 and DIF > DEA; exit when K, D, J are all above overbought.
+ * EWM 对齐 pandas ewm(..., adjust=False)，与看板 EMA 过滤里的 SMA 种子 MACD 不同。
+ */
+export function evaluateMacdKdjSignal(klines, coin = '', opts = {}) {
+  const interval = opts.interval || '1h';
+  const macdFast = Math.max(intParam(opts.macd_fast, 12), 1);
+  const macdSlow = Math.max(intParam(opts.macd_slow, 26), 1);
+  const macdSignal = Math.max(intParam(opts.macd_signal, 9), 1);
+  const kdjN = Math.max(intParam(opts.kdj_n, 9), 1);
+  const kdjKSmooth = Math.max(intParam(opts.kdj_k_smooth, 3), 1);
+  const kdjDSmooth = Math.max(intParam(opts.kdj_d_smooth, 3), 1);
+  const overbought = Number.isFinite(Number(opts.overbought)) ? Number(opts.overbought) : 80;
+
+  if (!klines || klines.length < Math.max(macdSlow + macdSignal, kdjN) + 5) return null;
+
+  const n = klines.length;
+  const closes = new Array(n);
+  const highs = new Array(n);
+  const lows = new Array(n);
+  const times = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = klines[i];
+    times[i] = Array.isArray(k) ? Number(k[0]) : Number(k.t || 0);
+    highs[i] = Array.isArray(k) ? Number(k[2]) : Number(k.h);
+    lows[i] = Array.isArray(k) ? Number(k[3]) : Number(k.l);
+    closes[i] = Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close);
+  }
+
+  const emaFast = calcEwmSpan(closes, macdFast);
+  const emaSlow = calcEwmSpan(closes, macdSlow);
+  if (!emaFast || !emaSlow) return null;
+
+  const dif = emaFast.map((v, i) => (v == null || emaSlow[i] == null ? null : v - emaSlow[i]));
+  // Seed DEA only after DIF is available: compact then align (matches typical MACD pipeline)
+  const firstDif = dif.findIndex((v) => v != null);
+  if (firstDif < 0) return null;
+  const difCompact = dif.slice(firstDif);
+  const deaCompact = calcEwmSpan(difCompact, macdSignal);
+  const dea = new Array(n).fill(null);
+  if (deaCompact) {
+    for (let j = 0; j < deaCompact.length; j++) dea[firstDif + j] = deaCompact[j];
+  }
+  const hist = dif.map((v, i) => (v == null || dea[i] == null ? null : (v - dea[i]) * 2));
+
+  const lowest = rollingExtremum(lows, kdjN, 'min');
+  const highest = rollingExtremum(highs, kdjN, 'max');
+  const rsv = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (lowest[i] == null || highest[i] == null || !Number.isFinite(closes[i])) {
+      rsv[i] = 50; // pandas: NaN.fillna(50) including warmup bars
+      continue;
+    }
+    const range = highest[i] - lowest[i];
+    rsv[i] = range === 0 ? 50 : ((closes[i] - lowest[i]) / range) * 100;
+  }
+  const rsvSeries = rsv;
+  const kArr = calcEwmAlpha(rsvSeries, 1 / kdjKSmooth);
+  const kForD = (kArr || []).map((v) => (v == null ? NaN : v));
+  const dArr = calcEwmAlpha(kForD, 1 / kdjDSmooth);
+  const jArr = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (kArr?.[i] == null || dArr?.[i] == null) continue;
+    jArr[i] = 3 * kArr[i] - 2 * dArr[i];
+  }
+
+  const buyZone = new Array(n).fill(false);
+  const sellZone = new Array(n).fill(false);
+  const buyEdge = new Array(n).fill(false);
+  const sellEdge = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    const bz = hist[i] != null && dif[i] != null && dea[i] != null
+      && hist[i] > 0 && dif[i] > dea[i];
+    const sz = kArr?.[i] != null && dArr?.[i] != null && jArr[i] != null
+      && kArr[i] > overbought && dArr[i] > overbought && jArr[i] > overbought;
+    buyZone[i] = !!bz;
+    sellZone[i] = !!sz;
+    const prevBuy = i > 0 ? buyZone[i - 1] : false;
+    const prevSell = i > 0 ? sellZone[i - 1] : false;
+    buyEdge[i] = buyZone[i] && !prevBuy;
+    sellEdge[i] = sellZone[i] && !prevSell;
+  }
+
+  const i = n - 1;
+  if (hist[i] == null || dif[i] == null || dea[i] == null || kArr?.[i] == null || dArr?.[i] == null || jArr[i] == null) {
+    return null;
+  }
+
+  const macdBull = buyZone[i];
+  const overboughtNow = sellZone[i];
+  let state = 'watch';
+  let stateLabel = '观望';
+  if (buyEdge[i]) {
+    state = 'entry';
+    stateLabel = '入场边沿';
+  } else if (sellEdge[i]) {
+    state = 'exit';
+    stateLabel = '离场边沿';
+  } else if (overboughtNow) {
+    // 超买离场条件优先于 MACD 多头持有（可同时成立）
+    state = 'overbought';
+    stateLabel = '超买区';
+  } else if (macdBull) {
+    state = 'hold';
+    stateLabel = '持有区';
+  }
+
+  const lastBuyIdx = findLastTrue(buyEdge, i);
+  const lastSellIdx = findLastTrue(sellEdge, i);
+  const lastBuy = lastBuyIdx == null ? null : {
+    barsAgo: i - lastBuyIdx,
+    timeAgoText: formatAgo(i - lastBuyIdx, interval),
+    time: times[lastBuyIdx] || null,
+    price: lows[lastBuyIdx] * 0.995,
+  };
+  const lastSell = lastSellIdx == null ? null : {
+    barsAgo: i - lastSellIdx,
+    timeAgoText: formatAgo(i - lastSellIdx, interval),
+    time: times[lastSellIdx] || null,
+    price: highs[lastSellIdx] * 1.005,
+  };
+
+  return {
+    coin,
+    interval,
+    name: 'MACD + KDJ Signal',
+    ready: true,
+    macdBull,
+    overbought: overboughtNow,
+    buyZone: macdBull,
+    sellZone: overboughtNow,
+    buyEdge: buyEdge[i],
+    sellEdge: sellEdge[i],
+    state,
+    stateLabel,
+    dif: dif[i],
+    dea: dea[i],
+    hist: hist[i],
+    k: kArr[i],
+    d: dArr[i],
+    j: jArr[i],
+    overboughtLevel: overbought,
+    lastBuy,
+    lastSell,
+    params: {
+      macd_fast: macdFast,
+      macd_slow: macdSlow,
+      macd_signal: macdSignal,
+      kdj_n: kdjN,
+      kdj_k_smooth: kdjKSmooth,
+      kdj_d_smooth: kdjDSmooth,
+      overbought,
+    },
+  };
+}
+
+function intParam(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+/**
+ * 执行周期 MACD+KDJ + 4h/1d 背景：顺势入场 / 逆势试多 / 离场；1d 只作文案环境。
+ */
+export function annotateMacdKdjContext(mk, htf4h, htf1d) {
+  if (!mk) return null;
+  const h4 = htf4h && htf4h.ready ? htf4h : null;
+  const d1 = htf1d && htf1d.ready ? htf1d : null;
+  const htfBull = !!(h4 && h4.macdBull);
+  const htfBear = !!(h4 && !h4.macdBull);
+  const htfOb = !!(h4 && h4.overbought);
+  const dBull = !!(d1 && d1.macdBull);
+  const dOb = !!(d1 && d1.overbought);
+
+  let action = mk.state;
+  let actionLabel = mk.stateLabel;
+  let bias = 'neutral';
+  let reason = '仅看本周期 MACD+KDJ';
+
+  if (mk.buyEdge) {
+    if (htfBull) {
+      action = 'entry';
+      actionLabel = '顺势入场';
+      bias = 'with';
+      reason = '本周期入场边沿，且 4h MACD 多头（hist>0 且 DIF>DEA）';
+    } else if (htfBear) {
+      action = 'counter';
+      actionLabel = '逆势试多';
+      bias = 'against';
+      reason = '本周期入场边沿，但 4h MACD 非多头，降权/轻仓';
+    } else {
+      action = 'entry';
+      actionLabel = '入场边沿';
+      reason = '本周期入场边沿；4h 背景未就绪';
+    }
+  } else if (mk.sellEdge) {
+    action = 'exit';
+    actionLabel = '离场边沿';
+    bias = htfOb ? 'with' : 'neutral';
+    reason = htfOb
+      ? '本周期 KDJ 三线突破超买，4h 亦超买，优先减仓/了结'
+      : '本周期 KDJ 三线突破超买（Long Exit），非反手做空';
+  } else if (mk.overbought) {
+    action = 'overbought';
+    actionLabel = '超买区';
+    reason = 'KDJ 三线仍在超买，等待离场边沿或回落（优先于 MACD 持有）';
+  } else if (mk.buyZone) {
+    action = 'hold';
+    if (htfBull) {
+      actionLabel = '持有区·顺势';
+      bias = 'with';
+      reason = '本周期仍在 MACD 多头区，4h 同向';
+    } else if (htfBear) {
+      actionLabel = '持有区·逆势';
+      bias = 'against';
+      reason = '本周期仍在 MACD 多头区，但 4h 非多头，留意离场';
+    } else {
+      actionLabel = '持有区';
+    }
+  }
+
+  const bg4Label = !h4 ? '4h--' : htfOb ? '4h超买' : htfBull ? '4h多头' : '4h空头';
+  const bg1Label = !d1 ? '1d--' : dOb ? '1d超买' : dBull ? '1d多头' : '1d空头';
+  const envNote = d1
+    ? (dOb && dBull ? '日线多头但KDJ超买' : dBull ? '日线多头环境' : '日线非多头环境')
+    : '日线背景未就绪';
+
+  return {
+    ...mk,
+    action,
+    actionLabel,
+    bias,
+    reason,
+    bg4Label,
+    bg1Label,
+    envNote,
+    htf4h: h4,
+    htf1d: d1,
+  };
 }
 
 function fmtUsd(n, price) {
@@ -442,36 +748,7 @@ export function evaluateAlphaTrend(klines, coin = '', opts = {}) {
   };
 }
 
-export function combineEmaAlpha(ema, at, bb) {
-  if (!ema) return null;
-
-  let base;
-  if (!at) {
-    base = {
-      dir: ema.setup === 'long' ? 'long' : ema.setup === 'short' ? 'short' : 'watch',
-      label: ema.setupLabel || '观望',
-      reason: 'AlphaTrend 未就绪，仅看 EMA 过滤开仓',
-    };
-  } else if (at.bull && ema.setup === 'long') {
-    base = { dir: 'long', label: '共振做多', reason: 'AlphaTrend 允许多 + EMA 过滤做多' };
-  } else if (at.bear && ema.setup === 'short') {
-    base = { dir: 'short', label: '共振做空', reason: 'AlphaTrend 允许空 + EMA 过滤做空' };
-  } else if (at.bull && ema.setup === 'short') {
-    base = { dir: 'watch', label: '分歧观望', reason: 'AT 只允许多，但 EMA 过滤给出做空' };
-  } else if (at.bear && ema.setup === 'long') {
-    base = { dir: 'watch', label: '分歧观望', reason: 'AT 只允许空，但 EMA 过滤给出做多' };
-  } else if (at.bull && ema.crossCandidate && ema.lastSignal?.dir === 'up') {
-    base = { dir: 'watch', label: 'AT多·上穿未过滤', reason: '有上穿56，但 MACD/RSI 未过，不能当开仓' };
-  } else if (at.bear && ema.crossCandidate && ema.lastSignal?.dir === 'down') {
-    base = { dir: 'watch', label: 'AT空·下穿未过滤', reason: '有下穿56，但 MACD/RSI 未过，不能当开仓' };
-  } else if (at.bull) {
-    base = { dir: 'watch', label: 'AT多·等EMA', reason: '只允许做多，等 EMA 过滤做多' };
-  } else if (at.bear) {
-    base = { dir: 'watch', label: 'AT空·等EMA', reason: '只允许做空，等 EMA 过滤做空' };
-  } else {
-    base = { dir: 'watch', label: '观望', reason: 'AlphaTrend 未给出方向' };
-  }
-
+function applyBollWidth(base, at, bb) {
   if (!bb) return base;
 
   const squeeze = bb.width === 'squeeze';
@@ -526,6 +803,122 @@ export function combineEmaAlpha(ema, at, bb) {
     };
   }
   return base;
+}
+
+function applyBollMid(base, at, bb, bm) {
+  if (!bm) return base;
+  const midLong = bm.setup === 'long';
+  const midShort = bm.setup === 'short';
+  if (!midLong && !midShort) return base;
+
+  const squeeze = bb && bb.width === 'squeeze';
+  const volTxt = Number.isFinite(bm.volRatio) ? `量能 ${bm.volRatio.toFixed(2)}x` : '放量';
+  const midNote = `${bm.setupLabel}（${volTxt}），回中轨平、止损 1.5%`;
+
+  if (squeeze) {
+    return {
+      dir: 'watch',
+      label: '闭口暂缓',
+      reason: base.label === '闭口暂缓'
+        ? `${base.reason}。中轴已触发（${bm.setupLabel}），闭口阶段仍不追`
+        : `${bb.widthLabel}，中轴虽给出${bm.setupLabel}，新趋势未开口，不追`,
+    };
+  }
+
+  const withMid = (dir, label, reason) => ({
+    dir,
+    label: label.includes('中轴') ? label : `${label}·中轴`,
+    reason: `${reason}。${midNote}`,
+  });
+
+  if (midLong && base.dir === 'long') {
+    return withMid('long', base.label, base.reason);
+  }
+  if (midShort && base.dir === 'short') {
+    return withMid('short', base.label, base.reason);
+  }
+  if (base.dir === 'long' || base.dir === 'short') {
+    return base;
+  }
+
+  if (midLong && at && at.bear) {
+    return { dir: 'watch', label: '中轴分歧', reason: `中轴做多，但 AlphaTrend ${at.stateLabel}，方向不一致先观望` };
+  }
+  if (midShort && at && at.bull) {
+    return { dir: 'watch', label: '中轴分歧', reason: `中轴做空，但 AlphaTrend ${at.stateLabel}，方向不一致先观望` };
+  }
+
+  const emaWait = /等EMA|未过滤/.test(base.label || '');
+  if (midLong && at && at.bull && (base.dir === 'watch') && emaWait) {
+    return {
+      dir: 'long',
+      label: '中轴共振做多',
+      reason: `中轴开仓触发且 AlphaTrend 允许多。EMA 过滤尚未齐，短线轻仓。${midNote}`,
+    };
+  }
+  if (midShort && at && at.bear && (base.dir === 'watch') && emaWait) {
+    return {
+      dir: 'short',
+      label: '中轴共振做空',
+      reason: `中轴开仓触发且 AlphaTrend 允许空。EMA 过滤尚未齐，短线轻仓。${midNote}`,
+    };
+  }
+  if (midLong && at && at.bull && base.dir === 'watch') {
+    return {
+      dir: 'long',
+      label: '中轴共振做多',
+      reason: `中轴开仓触发且 AlphaTrend 允许多。${midNote}`,
+    };
+  }
+  if (midShort && at && at.bear && base.dir === 'watch') {
+    return {
+      dir: 'short',
+      label: '中轴共振做空',
+      reason: `中轴开仓触发且 AlphaTrend 允许空。${midNote}`,
+    };
+  }
+  if ((midLong || midShort) && !at) {
+    return {
+      dir: 'watch',
+      label: bm.setupLabel,
+      reason: `中轴已触发，但 AlphaTrend 未就绪，不当共振开仓。${midNote}`,
+    };
+  }
+  return base;
+}
+
+export function combineEmaAlpha(ema, at, bb, bollMid) {
+  if (!ema) return null;
+
+  let base;
+  if (!at) {
+    base = {
+      dir: ema.setup === 'long' ? 'long' : ema.setup === 'short' ? 'short' : 'watch',
+      label: ema.setupLabel || '观望',
+      reason: 'AlphaTrend 未就绪，仅看 EMA 过滤开仓',
+    };
+  } else if (at.bull && ema.setup === 'long') {
+    base = { dir: 'long', label: '共振做多', reason: 'AlphaTrend 允许多 + EMA 过滤做多' };
+  } else if (at.bear && ema.setup === 'short') {
+    base = { dir: 'short', label: '共振做空', reason: 'AlphaTrend 允许空 + EMA 过滤做空' };
+  } else if (at.bull && ema.setup === 'short') {
+    base = { dir: 'watch', label: '分歧观望', reason: 'AT 只允许多，但 EMA 过滤给出做空' };
+  } else if (at.bear && ema.setup === 'long') {
+    base = { dir: 'watch', label: '分歧观望', reason: 'AT 只允许空，但 EMA 过滤给出做多' };
+  } else if (at.bull && ema.crossCandidate && ema.lastSignal?.dir === 'up') {
+    base = { dir: 'watch', label: 'AT多·上穿未过滤', reason: '有上穿56，但 MACD/RSI 未过，不能当开仓' };
+  } else if (at.bear && ema.crossCandidate && ema.lastSignal?.dir === 'down') {
+    base = { dir: 'watch', label: 'AT空·下穿未过滤', reason: '有下穿56，但 MACD/RSI 未过，不能当开仓' };
+  } else if (at.bull) {
+    base = { dir: 'watch', label: 'AT多·等EMA', reason: '只允许做多，等 EMA 过滤做多' };
+  } else if (at.bear) {
+    base = { dir: 'watch', label: 'AT空·等EMA', reason: '只允许做空，等 EMA 过滤做空' };
+  } else {
+    base = { dir: 'watch', label: '观望', reason: 'AlphaTrend 未给出方向' };
+  }
+
+  const gated = applyBollWidth(base, at, bb);
+  return applyBollMid(gated, at, bb, bollMid || ema.bollMid);
 }
 
 /**
@@ -678,7 +1071,7 @@ export function evaluateBollMidStrategy(klines, coin = '', opts = {}) {
   const interval = opts.interval || '1h';
   const slopeLen = 5;
   const slopeTh = opts.slopeThreshold == null ? 0.0009 : Number(opts.slopeThreshold);
-  const volMult = opts.volMultiplier == null ? 2 : Number(opts.volMultiplier);
+  const volMult = opts.volMultiplier == null ? 1.4 : Number(opts.volMultiplier);
   const volMaLen = 15;
   if (!klines || klines.length < 40) return null;
 
@@ -822,7 +1215,8 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   ema.alpha = at;
   ema.bb = evaluateBollinger(klines, ema.coin, opts);
   ema.bollMid = evaluateBollMidStrategy(klines, ema.coin, opts);
-  ema.combined = combineEmaAlpha(ema, at, ema.bb);
+  ema.macdKdj = evaluateMacdKdjSignal(klines, ema.coin, opts);
+  ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
   return ema;
 }
 

@@ -4,13 +4,17 @@
 import {
   STRATEGY_SYMBOLS,
   evaluateEmaTrendStrategy,
+  evaluateMacdKdjSignal,
+  annotateMacdKdjContext,
   attachAlphaTrend,
   resampleLast,
   toDominanceKlines,
   INTERVAL_MS,
+  EXEC_INTERVALS,
+  HTF_INTERVALS,
 } from '../public/ema-core.js';
 
-export { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy };
+export { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy, evaluateMacdKdjSignal };
 
 const CG_IDS = {
   BTC: 'bitcoin',
@@ -66,27 +70,47 @@ async function fetchCgKlines(coin, interval) {
   return sampled.map(([t, p]) => [t, p, p, p, p, 0]);
 }
 
+function enrichBoardMacdKdj(board) {
+  for (const tf of EXEC_INTERVALS) {
+    for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+      const row = board[tf] && board[tf][coin];
+      if (!row || !row.macdKdj) continue;
+      row.macdKdjView = annotateMacdKdjContext(row.macdKdj, board['4h']?.[coin], board['1d']?.[coin]);
+    }
+  }
+  return board;
+}
+
 export function normalizeBoard(raw) {
-  const empty = { '15m': {}, '1h': {}, usdtD: { '15m': null, '1h': null } };
+  const empty = {
+    '15m': {},
+    '1h': {},
+    '4h': {},
+    '1d': {},
+    usdtD: { '15m': null, '1h': null },
+  };
   if (!raw || typeof raw !== 'object') return empty;
-  if (raw['15m'] || raw['1h'] || raw.usdtD) {
-    return {
+  if (raw['15m'] || raw['1h'] || raw['4h'] || raw['1d'] || raw.usdtD) {
+    const out = {
       '15m': raw['15m'] && typeof raw['15m'] === 'object' ? raw['15m'] : {},
       '1h': raw['1h'] && typeof raw['1h'] === 'object' ? raw['1h'] : {},
+      '4h': raw['4h'] && typeof raw['4h'] === 'object' ? raw['4h'] : {},
+      '1d': raw['1d'] && typeof raw['1d'] === 'object' ? raw['1d'] : {},
       usdtD: raw.usdtD && typeof raw.usdtD === 'object' ? raw.usdtD : empty.usdtD,
       errors: raw.errors || [],
     };
+    return enrichBoardMacdKdj(out);
   }
   const h1 = {};
   for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
     if (raw[coin] && raw[coin].lastSignal) h1[coin] = raw[coin];
   }
-  return { '15m': {}, '1h': h1, usdtD: empty.usdtD, errors: [] };
+  return { ...empty, '1h': h1, errors: [] };
 }
 
 export function boardHasRows(board) {
   const b = normalizeBoard(board);
-  for (const tf of ['15m', '1h']) {
+  for (const tf of EXEC_INTERVALS) {
     for (const row of Object.values(b[tf] || {})) {
       if (row && row.lastSignal) return true;
     }
@@ -98,15 +122,27 @@ export function boardHasRows(board) {
 function mergeBoards(live, cached) {
   const a = normalizeBoard(live);
   const b = normalizeBoard(cached);
-  const out = { '15m': { ...b['15m'] }, '1h': { ...b['1h'] }, usdtD: { ...b.usdtD }, errors: a.errors || [] };
-  for (const tf of ['15m', '1h']) {
+  const out = {
+    '15m': { ...b['15m'] },
+    '1h': { ...b['1h'] },
+    '4h': { ...b['4h'] },
+    '1d': { ...b['1d'] },
+    usdtD: { ...b.usdtD },
+    errors: a.errors || [],
+  };
+  for (const tf of EXEC_INTERVALS) {
     for (const [coin, row] of Object.entries(a[tf] || {})) {
       if (row && row.lastSignal) out[tf][coin] = row;
     }
   }
+  for (const tf of HTF_INTERVALS) {
+    for (const [coin, row] of Object.entries(a[tf] || {})) {
+      if (row && row.ready) out[tf][coin] = row;
+    }
+  }
   if (a.usdtD?.['1h']?.lastSignal) out.usdtD['1h'] = a.usdtD['1h'];
   if (a.usdtD?.['15m']?.lastSignal) out.usdtD['15m'] = a.usdtD['15m'];
-  return out;
+  return enrichBoardMacdKdj(out);
 }
 
 async function fetchCgChart(id, days) {
@@ -153,10 +189,18 @@ export async function fetchUsdtDStrategies(liveUsdtD = null) {
 
 export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
   const includeUsdtD = opts.includeUsdtD !== false;
-  const intervals = opts.intervals || ['15m', '1h'];
-  const board = { '15m': {}, '1h': {}, usdtD: { '15m': null, '1h': null }, errors: [] };
+  const intervals = opts.intervals || [...EXEC_INTERVALS, ...HTF_INTERVALS];
+  const board = {
+    '15m': {},
+    '1h': {},
+    '4h': {},
+    '1d': {},
+    usdtD: { '15m': null, '1h': null },
+    errors: [],
+  };
   const jobs = [];
   for (const interval of intervals) {
+    const isHtf = HTF_INTERVALS.includes(interval);
     for (const [coin, symbol] of Object.entries(STRATEGY_SYMBOLS)) {
       jobs.push((async () => {
         try {
@@ -164,11 +208,17 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
           try {
             klines = await fetchKlines(symbol, interval, KLINE_LIMIT);
           } catch {
+            if (isHtf) throw new Error('htf needs binance klines');
             klines = await fetchCgKlines(coin, interval);
           }
-          const row = evaluateEmaTrendStrategy(klines, coin, { interval });
-          board[interval][coin] = row ? attachAlphaTrend(row, klines, { interval }) : null;
-          if (!board[interval][coin]) board.errors.push(`${coin} ${interval}: 指标不足`);
+          if (isHtf) {
+            board[interval][coin] = evaluateMacdKdjSignal(klines, coin, { interval });
+            if (!board[interval][coin]) board.errors.push(`${coin} ${interval}: MACD+KDJ 不足`);
+          } else {
+            const row = evaluateEmaTrendStrategy(klines, coin, { interval });
+            board[interval][coin] = row ? attachAlphaTrend(row, klines, { interval }) : null;
+            if (!board[interval][coin]) board.errors.push(`${coin} ${interval}: 指标不足`);
+          }
         } catch (e) {
           board[interval][coin] = null;
           board.errors.push(`${coin} ${interval}: ${e.message || e}`);
@@ -182,7 +232,7 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
     })());
   }
   await Promise.all(jobs);
-  return board;
+  return enrichBoardMacdKdj(board);
 }
 
 export { mergeBoards };
