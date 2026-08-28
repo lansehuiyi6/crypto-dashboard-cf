@@ -139,6 +139,305 @@ function lsSet(key, data) {
   } catch { /* quota / private mode */ }
 }
 
+const LS_NOTIFY_PREF = 'cd:notify:pref';
+const LS_NOTIFY_STATE = 'cd:notify:state';
+const LS_NOTIFY_SENT = 'cd:notify:sent';
+const NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
+const NOTIFY_SENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function defaultNotifyPref() {
+  return { enabled: false };
+}
+
+function readNotifyPref() {
+  try {
+    const raw = localStorage.getItem(LS_NOTIFY_PREF);
+    if (!raw) return defaultNotifyPref();
+    const o = JSON.parse(raw);
+    return { ...defaultNotifyPref(), ...(o && typeof o === 'object' ? o : {}) };
+  } catch {
+    return defaultNotifyPref();
+  }
+}
+
+function writeNotifyPref(pref) {
+  try {
+    localStorage.setItem(LS_NOTIFY_PREF, JSON.stringify(pref));
+  } catch { /* ignore */ }
+}
+
+function notifySupported() {
+  return typeof window !== 'undefined' && 'Notification' in window;
+}
+
+function notifyPermission() {
+  if (!notifySupported()) return 'unsupported';
+  return Notification.permission; // granted | denied | default
+}
+
+function canNotify() {
+  const pref = readNotifyPref();
+  return !!(pref.enabled && notifySupported() && Notification.permission === 'granted');
+}
+
+function readNotifyMap(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const o = JSON.parse(raw);
+    return o && typeof o === 'object' ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeNotifyMap(key, map) {
+  try {
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+function pruneNotifySent(sent) {
+  const now = Date.now();
+  const out = {};
+  for (const [k, ts] of Object.entries(sent || {})) {
+    if (Number.isFinite(ts) && now - ts < NOTIFY_SENT_MAX_AGE_MS) out[k] = ts;
+  }
+  return out;
+}
+
+function isActionCombined(label, dir) {
+  if (dir !== 'long' && dir !== 'short') return false;
+  const s = String(label || '');
+  return /共振|做多|做空|中轴/.test(s) && !/暂缓|分歧|等EMA|未过滤/.test(s);
+}
+
+function snapshotEmaAlerts(board) {
+  const out = {};
+  if (!board) return out;
+  for (const tf of EXEC_INTERVALS) {
+    for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+      const row = board[tf] && board[tf][coin];
+      if (!row) continue;
+      const c = row.combined || {};
+      const mk = row.macdKdjView || row.macdKdj || {};
+      const bm = row.bollMid || {};
+      out[`${coin}|${tf}|combined`] = {
+        kind: 'combined',
+        coin,
+        tf,
+        dir: c.dir || 'watch',
+        label: c.label || '观望',
+        reason: c.reason || '',
+        active: isActionCombined(c.label, c.dir),
+      };
+      out[`${coin}|${tf}|mk`] = {
+        kind: 'mk',
+        coin,
+        tf,
+        dir: mk.action === 'exit' || mk.action === 'overbought' ? 'short'
+          : mk.action === 'entry' || (mk.action === 'hold' && mk.bias === 'with') ? 'long'
+            : 'watch',
+        label: mk.actionLabel || mk.stateLabel || '观望',
+        reason: mk.reason || '',
+        active: !!(mk.buyEdge || mk.sellEdge || mk.action === 'entry' || mk.action === 'exit' || mk.action === 'counter'),
+        edge: mk.buyEdge ? 'entry' : mk.sellEdge ? 'exit' : '',
+      };
+      out[`${coin}|${tf}|mid`] = {
+        kind: 'mid',
+        coin,
+        tf,
+        dir: bm.setup === 'long' || bm.setup === 'short' ? bm.setup : 'watch',
+        label: bm.setupLabel || '中轴观望',
+        reason: bm.hint || '',
+        active: bm.setup === 'long' || bm.setup === 'short',
+      };
+    }
+  }
+  return out;
+}
+
+function notifyKindTitle(kind) {
+  if (kind === 'combined') return '共振/合成';
+  if (kind === 'mk') return 'MACD+KDJ';
+  if (kind === 'mid') return '中轴';
+  return '策略';
+}
+
+function shouldEmitAlert(prev, next) {
+  // 新 key（首屏增量加载）只建基线，不弹窗
+  if (!prev || !next) return null;
+  if (!next.active) {
+    if (prev.active) {
+      return {
+        title: `${next.coin} ${next.tf} · ${notifyKindTitle(next.kind)}结束`,
+        body: `${prev.label} → ${next.label || '观望'}`,
+        tag: `${next.coin}-${next.tf}-${next.kind}-off`,
+        fingerprint: `${next.coin}|${next.tf}|${next.kind}|off|${prev.label}`,
+      };
+    }
+    return null;
+  }
+  const changed = prev.label !== next.label
+    || prev.dir !== next.dir
+    || prev.edge !== next.edge
+    || !prev.active;
+  if (!changed) return null;
+  const edgeTxt = next.edge === 'entry' ? '入场边沿' : next.edge === 'exit' ? '离场边沿' : '';
+  return {
+    title: `${next.coin} ${next.tf} · ${notifyKindTitle(next.kind)}${edgeTxt ? ' ' + edgeTxt : ''}`,
+    body: `${next.label}${next.reason ? ' — ' + next.reason : ''}`,
+    tag: `${next.coin}-${next.tf}-${next.kind}`,
+    fingerprint: `${next.coin}|${next.tf}|${next.kind}|${next.label}|${next.edge || ''}`,
+  };
+}
+
+function showBrowserNotification(title, body, tag) {
+  if (!canNotify()) return false;
+  try {
+    const n = new Notification(title, {
+      body: body || '',
+      tag: tag || undefined,
+      renotify: true,
+      silent: false,
+    });
+    n.onclick = () => {
+      try { window.focus(); } catch { /* ignore */ }
+      n.close();
+    };
+    return true;
+  } catch (e) {
+    console.warn('Notification failed', e.message || e);
+    return false;
+  }
+}
+
+function processEmaNotifications(board, { bootstrap = false } = {}) {
+  const nextMap = snapshotEmaAlerts(board);
+  const prevMap = readNotifyMap(LS_NOTIFY_STATE);
+  const hasPrev = Object.keys(prevMap).length > 0;
+
+  if (bootstrap || !hasPrev) {
+    writeNotifyMap(LS_NOTIFY_STATE, nextMap);
+    return;
+  }
+  if (!canNotify()) {
+    writeNotifyMap(LS_NOTIFY_STATE, nextMap);
+    return;
+  }
+
+  let sent = pruneNotifySent(readNotifyMap(LS_NOTIFY_SENT));
+  const now = Date.now();
+  const events = [];
+  for (const [key, next] of Object.entries(nextMap)) {
+    const prev = prevMap[key];
+    const ev = shouldEmitAlert(prev, next);
+    if (!ev) continue;
+    const last = sent[ev.fingerprint];
+    if (Number.isFinite(last) && now - last < NOTIFY_COOLDOWN_MS) continue;
+    events.push(ev);
+  }
+
+  // 同一次刷新最多弹 3 条，避免刷屏
+  for (const ev of events.slice(0, 3)) {
+    if (showBrowserNotification(ev.title, ev.body, ev.tag)) {
+      sent[ev.fingerprint] = now;
+    }
+  }
+  writeNotifyMap(LS_NOTIFY_SENT, sent);
+  writeNotifyMap(LS_NOTIFY_STATE, nextMap);
+}
+
+function updateNotifyUi() {
+  const btn = document.getElementById('emaNotifyToggle');
+  const testBtn = document.getElementById('emaNotifyTest');
+  const status = document.getElementById('emaNotifyStatus');
+  if (!btn || !status) return;
+  const pref = readNotifyPref();
+  const perm = notifyPermission();
+
+  if (perm === 'unsupported') {
+    btn.disabled = true;
+    btn.textContent = '通知不可用';
+    btn.classList.remove('on');
+    if (testBtn) testBtn.hidden = true;
+    status.textContent = '当前浏览器不支持 Notification';
+    return;
+  }
+
+  btn.disabled = false;
+  if (perm === 'denied') {
+    btn.classList.remove('on');
+    btn.textContent = '通知已被禁用';
+    if (testBtn) testBtn.hidden = true;
+    status.textContent = '请在浏览器站点设置里允许通知';
+    return;
+  }
+
+  if (pref.enabled && perm === 'granted') {
+    btn.classList.add('on');
+    btn.textContent = '通知已开启';
+    if (testBtn) testBtn.hidden = false;
+    status.textContent = '共振 / 中轴 / MK 边沿变化会提醒 · 需保持页面开启';
+  } else {
+    btn.classList.remove('on');
+    btn.textContent = '开启浏览器通知';
+    if (testBtn) testBtn.hidden = true;
+    status.textContent = perm === 'default' ? '点击授权后，重要信号变化会弹窗提醒' : '已授权，点击开启提醒';
+  }
+}
+
+async function toggleEmaNotify() {
+  if (!notifySupported()) {
+    updateNotifyUi();
+    return;
+  }
+  const pref = readNotifyPref();
+  if (Notification.permission === 'denied') {
+    updateNotifyUi();
+    return;
+  }
+  if (Notification.permission !== 'granted') {
+    const res = await Notification.requestPermission();
+    if (res !== 'granted') {
+      writeNotifyPref({ ...pref, enabled: false });
+      updateNotifyUi();
+      return;
+    }
+    writeNotifyPref({ ...pref, enabled: true });
+    if (lastEmaBoard) processEmaNotifications(lastEmaBoard, { bootstrap: true });
+    showBrowserNotification('短线策略通知已开启', '之后共振/中轴/MACD+KDJ 重要变化会提醒（页面需保持打开）', 'ema-notify-on');
+    updateNotifyUi();
+    return;
+  }
+  const enabled = !pref.enabled;
+  writeNotifyPref({ ...pref, enabled });
+  if (enabled) {
+    if (lastEmaBoard) processEmaNotifications(lastEmaBoard, { bootstrap: true });
+    showBrowserNotification('短线策略通知已开启', '之后共振/中轴/MACD+KDJ 重要变化会提醒（页面需保持打开）', 'ema-notify-on');
+  }
+  updateNotifyUi();
+}
+
+function testEmaNotify() {
+  if (!canNotify()) {
+    updateNotifyUi();
+    return;
+  }
+  showBrowserNotification('测试通知', '浏览器通知工作正常。策略变化时会用同样方式提醒。', 'ema-notify-test');
+}
+
+function initEmaNotifyUi() {
+  const btn = document.getElementById('emaNotifyToggle');
+  const testBtn = document.getElementById('emaNotifyTest');
+  if (btn) btn.addEventListener('click', () => { toggleEmaNotify().catch(() => updateNotifyUi()); });
+  if (testBtn) testBtn.addEventListener('click', testEmaNotify);
+  updateNotifyUi();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') updateNotifyUi();
+  });
+}
+
 function klineFreshMs(interval) {
   if (interval === '15m') return 90 * 1000;
   if (interval === '1h') return 4 * 60 * 1000;
@@ -569,6 +868,7 @@ function paintEmaBoard(data) {
   renderEmaCards(data);
   renderShortSignalCards();
   renderUsdtDBox(data && data.usdtD);
+  processEmaNotifications(data);
 }
 
 function renderUsdtDBox(usdtD) {
@@ -1373,6 +1673,7 @@ document.getElementById('refreshBtn').addEventListener('click', () => {
   refreshAll(true);
 });
 
+initEmaNotifyUi();
 refreshAll();
 setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);

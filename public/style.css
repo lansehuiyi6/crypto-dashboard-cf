@@ -200,7 +200,7 @@ body {
 .strategy-tag.watch { color: var(--text-secondary); }
 
 .ema-board {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
   padding: 16px 18px 18px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
@@ -213,6 +213,56 @@ body {
   flex-wrap: wrap;
   gap: 8px 10px;
   margin: 0 0 6px;
+}
+
+.ema-notify {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-left: auto;
+}
+
+.ema-notify-btn {
+  appearance: none;
+  border: 1px solid rgba(88, 166, 255, 0.45);
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.ema-notify-btn:hover {
+  background: rgba(88, 166, 255, 0.2);
+}
+
+.ema-notify-btn.on {
+  border-color: rgba(63, 185, 80, 0.5);
+  background: rgba(63, 185, 80, 0.14);
+  color: var(--teal);
+}
+
+.ema-notify-btn.ghost {
+  border-color: var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.ema-notify-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ema-notify-status {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  max-width: 320px;
+  line-height: 1.35;
 }
 
 .ema-board-header h2 {
@@ -578,10 +628,18 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 
-.short-section { margin-bottom: 16px; }
+.short-term-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0 0 20px;
+}
+
+.short-section { margin: 0; }
+
 .panel-body-short { max-height: none; overflow: visible; }
 .panel-note {
   font-size: 12px;
@@ -592,6 +650,23 @@ body {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
+}
+
+.valuescan-section {
+  margin: 0 0 20px;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.section-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0 0 10px;
 }
 
 .lower-grid {
@@ -949,11 +1024,15 @@ body {
 
 /* === 涨势反转区 === */
 .reversal-section {
-  margin: 20px 0;
+  margin: 0;
   padding: 16px;
   background: linear-gradient(135deg, rgba(255, 82, 82, 0.04) 0%, rgba(255, 152, 0, 0.04) 100%);
   border: 1px solid rgba(255, 82, 82, 0.25);
   border-radius: 8px;
+}
+
+.short-term-stack .reversal-section {
+  margin: 0;
 }
 
 .reversal-header h2 {
