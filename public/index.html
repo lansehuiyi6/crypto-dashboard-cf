@@ -37,16 +37,20 @@
 
     <section class="ema-board" id="emaBoard">
       <div class="ema-board-header">
-        <h2>EMA7/21/56 策略 <span class="ema-badge">15m / 1h · MK+4h/1d</span></h2>
-        <div class="ema-board-desc">
-          <strong>上穿/下穿56</strong>只是穿越标记，不是开仓。
-          <strong>做多/做空</strong>才叠加 MACD 0 轴 + RSI6 过滤。
-          <strong>AlphaTrend</strong>当方向开关（绿只允许多、红只允许空）。
-          <strong>共振开仓</strong> = AT 方向 ∩（EMA 过滤 或 中轴触发）；<strong>突然开口</strong>视为新趋势有利条件，<strong>闭口</strong>则暂缓开仓。
-          <strong>布林(20,2)</strong>：闭口蓄势、开口顺势；宽度稳定时上轨高抛、下轨低吸。卡片直接给出上/中/下轨。
-          <strong>中轴开仓</strong>：价在中轨上/下 + EMA6/12 同向 + 快线斜率 + 放量（≥1.4×均量）阳/阴线；回中轨考虑平仓，止损 1.5%。
-          <strong>MACD+KDJ</strong>：15m/1h 执行（柱&gt;0 且 DIF&gt;DEA 入场；K/D/J 全&gt;80 离场）；<strong>4h</strong> 作顺势/逆势背景，<strong>1d</strong> 只作文案环境。离场≠反手做空。
+        <div class="ema-board-title-row">
+          <h2>短线策略看板</h2>
+          <span class="ema-badge">15m / 1h · 4h/1d 背景</span>
         </div>
+        <p class="ema-board-lead">合成信号看开仓；穿越只是标记。MACD+KDJ 独立进出，4h 过滤顺势/逆势，1d 只看环境。</p>
+        <details class="ema-board-help">
+          <summary>策略说明</summary>
+          <div class="ema-board-desc">
+            <p><strong>上穿/下穿56</strong>只是穿越标记，不是开仓。<strong>做多/做空</strong>才叠加 MACD 0 轴 + RSI6 过滤。</p>
+            <p><strong>AlphaTrend</strong>当方向开关。<strong>共振开仓</strong> = AT ∩（EMA 过滤 或 中轴）；开口顺势、闭口暂缓。</p>
+            <p><strong>布林(20,2)</strong>看波动环境；<strong>中轴</strong>：中轨 + EMA6/12 + 放量，止损 1.5%。</p>
+            <p><strong>MACD+KDJ</strong>：柱&gt;0 且 DIF&gt;DEA 入场；K/D/J 全&gt;80 离场（≠反手做空）。</p>
+          </div>
+        </details>
       </div>
       <div class="ema-cards" id="emaCards">
         <div class="empty">正在计算 15m / 1h 策略...</div>

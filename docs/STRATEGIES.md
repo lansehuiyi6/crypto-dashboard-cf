@@ -2,7 +2,7 @@
 
 页面「EMA7/21/56 策略」按币卡片与「短线操作信号」15m / 1h 阐述，都来自浏览器直连币安 K 线后本地计算（`public/ema-core.js`）。自有信号引擎（Top 250 打分）是另一套，见仓库根目录 README。
 
-周期：每个品种算 **15m / 1h**（完整短线叠加），另拉 **4h / 1d** 仅算 MACD+KDJ 背景。覆盖 BTC / ETH / BNB / SOL / XAU。
+周期：每个品种算 **15m / 1h**（完整短线叠加），另拉 **4h / 1d** 仅算 MACD+KDJ 背景。覆盖 BTC / ETH / BNB / SOL / XRP / XAU。
 
 ---
 
@@ -167,6 +167,6 @@ EWM 对齐 pandas `ewm(..., adjust=False)`，**与**上方「EMA 过滤」里 SM
 
 | | 短线叠加（本页卡片） | 自有信号引擎 |
 |--|--|--|
-| 标的 | BTC ETH BNB SOL XAU | CoinGecko Top 250 |
+| 标的 | BTC ETH BNB SOL XRP XAU | CoinGecko Top 250 |
 | 数据 | 打开页面拉币安 K 线 | GitHub Actions 约 15 分钟扫一次 |
 | 内容 | EMA / AT / 布林 / 中轴 / MACD+KDJ | 动量、成交额、EMA5/21/56 金叉死叉专区 |

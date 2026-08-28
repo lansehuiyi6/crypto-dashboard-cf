@@ -6,6 +6,7 @@ export const STRATEGY_SYMBOLS = {
   ETH: 'ETHUSDT',
   BNB: 'BNBUSDT',
   SOL: 'SOLUSDT',
+  XRP: 'XRPUSDT',
   XAU: 'XAUUSDT',
 };
 

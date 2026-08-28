@@ -11,9 +11,10 @@ const MAJOR_IDS = {
   ethereum: { key: 'ETH', coin: 'ETH' },
   binancecoin: { key: 'BNB', coin: 'BNB' },
   solana: { key: 'SOL', coin: 'SOL' },
+  ripple: { key: 'XRP', coin: 'XRP' },
 };
 
-const CARD_ORDER = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
+const CARD_ORDER = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'XAU'];
 
 function num(v) {
   if (v == null || v === '') return null;
@@ -382,6 +383,7 @@ export function assembleMarketSignals({ majors = {}, prices = {}, gold = null, s
     ETH: mergeMajor(majors.ETH, prices.ethereum, 'ETH'),
     BNB: mergeMajor(majors.BNB, prices.binancecoin, 'BNB'),
     SOL: mergeMajor(majors.SOL, prices.solana, 'SOL'),
+    XRP: mergeMajor(majors.XRP, prices.ripple, 'XRP'),
     XAU: mergeMajor(
       majors.XAU || (num(gold?.spot_usd_oz) || num(gold?.xau?.price)
         ? { coin: 'XAU/USD', price: num(gold.spot_usd_oz) ?? num(gold.xau?.price) }

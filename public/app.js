@@ -381,9 +381,10 @@ function fmtMcap(v) {
 }
 
 function emaCrossHtml(ls) {
-  if (!ls) return '<span class="ema-cross">尚无穿越</span>';
+  if (!ls) return '<span class="ema-muted">尚无穿越</span>';
   const cls = ls.dir === 'up' ? 'ema-up' : 'ema-down';
-  return `<span class="ema-cross ${cls}">${ls.label}</span>`;
+  const ago = ls.timeAgoText ? `<span class="ema-muted"> · ${ls.timeAgoText}</span>` : '';
+  return `<span class="ema-cross ${cls}">${ls.label}</span>${ago}`;
 }
 
 function emaFilterText(row) {
@@ -391,20 +392,26 @@ function emaFilterText(row) {
   const rsi = Number.isFinite(row.rsi6) ? row.rsi6.toFixed(0) : '--';
   const macd = row.macdAboveZero ? 'MACD>0' : 'MACD<0';
   const tagCls = row.setup === 'long' ? 'long' : row.setup === 'short' ? 'short' : 'watch';
-  return `<span class="strategy-tag ${tagCls}">${row.setupLabel}</span> ${macd} · RSI6 ${rsi}`;
+  return `<span class="strategy-tag ${tagCls}">${row.setupLabel}</span><span class="ema-meta">${macd} · RSI6 ${rsi}</span>`;
 }
 
 function alphaHtml(at) {
   if (!at) return '<span class="strategy-tag watch">--</span>';
   const cls = at.bull ? 'long' : at.bear ? 'short' : 'watch';
-  return `<span class="strategy-tag ${cls}">${at.stateLabel}</span> ${at.lastEventLabel || ''}`;
+  const ev = at.lastEventLabel ? `<span class="ema-meta">${at.lastEventLabel}</span>` : '';
+  return `<span class="strategy-tag ${cls}">${at.stateLabel}</span>${ev}`;
 }
 
 function combinedHtml(row) {
   const c = row && row.combined;
-  if (!c) return '--';
+  if (!c) return '<span class="strategy-tag watch">--</span>';
   const cls = c.dir === 'long' ? 'long' : c.dir === 'short' ? 'short' : 'watch';
   return `<span class="strategy-tag ${cls}">${c.label}</span>`;
+}
+
+function combinedDir(row) {
+  const d = row && row.combined && row.combined.dir;
+  return d === 'long' || d === 'short' ? d : 'watch';
 }
 
 function bbHtml(bb) {
@@ -418,7 +425,8 @@ function bbHtml(bb) {
 function bollMidHtml(bm) {
   if (!bm) return '<span class="strategy-tag watch">--</span>';
   const cls = bm.setup === 'long' ? 'long' : bm.setup === 'short' ? 'short' : 'watch';
-  return `<span class="strategy-tag ${cls}" title="${escAttr(bm.hint || '')}">${bm.setupLabel}</span> ${bm.lastLabel || ''}`;
+  const last = bm.lastLabel ? `<span class="ema-meta">${bm.lastLabel}</span>` : '';
+  return `<span class="strategy-tag ${cls}" title="${escAttr(bm.hint || '')}">${bm.setupLabel}</span>${last}`;
 }
 
 function macdKdjActionClass(view) {
@@ -439,11 +447,11 @@ function macdKdjHtml(view) {
   const d = Number.isFinite(view.d) ? view.d.toFixed(0) : '--';
   const j = Number.isFinite(view.j) ? view.j.toFixed(0) : '--';
   const edge = view.buyEdge && view.lastBuy
-    ? `买 ${view.lastBuy.timeAgoText}`
+    ? ` · 买 ${view.lastBuy.timeAgoText}`
     : view.sellEdge && view.lastSell
-      ? `卖 ${view.lastSell.timeAgoText}`
+      ? ` · 卖 ${view.lastSell.timeAgoText}`
       : '';
-  return `<span class="strategy-tag ${cls}" title="${escAttr(view.reason || '')}">${view.actionLabel}</span> Hist ${hist} · KDJ ${k}/${d}/${j}${edge ? ' · ' + edge : ''}`;
+  return `<span class="strategy-tag ${cls}" title="${escAttr(view.reason || '')}">${view.actionLabel}</span><span class="ema-meta">Hist ${hist} · KDJ ${k}/${d}/${j}${edge}</span>`;
 }
 
 function macdKdjBgHtml(board, coin) {
@@ -451,25 +459,17 @@ function macdKdjBgHtml(board, coin) {
   const d1 = board && board['1d'] && board['1d'][coin];
   const c4 = !h4 ? 'watch' : h4.overbought ? 'short' : h4.macdBull ? 'long' : 'watch';
   const c1 = !d1 ? 'watch' : d1.overbought ? 'short' : d1.macdBull ? 'long' : 'watch';
-  const label4 = !h4 ? '4h--' : h4.overbought ? '4h超买' : h4.macdBull ? '4h多头' : '4h空头';
-  const label1 = !d1 ? '1d--' : d1.overbought ? '1d超买' : d1.macdBull ? '1d多头' : '1d空头';
-  const t4 = h4
-    ? `${label4} · Hist ${Number.isFinite(h4.hist) ? h4.hist.toPrecision(3) : '--'} · KDJ ${Number.isFinite(h4.k) ? h4.k.toFixed(0) : '--'}/${Number.isFinite(h4.d) ? h4.d.toFixed(0) : '--'}/${Number.isFinite(h4.j) ? h4.j.toFixed(0) : '--'}`
-    : '4h 背景未就绪';
-  const t1 = d1
-    ? `${label1} · ${d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线非多头环境'}`
-    : '1d 背景未就绪';
-  return `<div class="mk-bg">
-    <span class="mk-bg-label">背景</span>
-    <span class="strategy-tag ${c4}" title="4h 作顺势/逆势过滤">${t4}</span>
-    <span class="strategy-tag ${c1}" title="1d 只作文案环境，不当日内出场">${t1}</span>
+  const label4 = !h4
+    ? '4h 背景未就绪'
+    : `${h4.overbought ? '4h 超买' : h4.macdBull ? '4h 多头' : '4h 空头'} · Hist ${Number.isFinite(h4.hist) ? h4.hist.toPrecision(3) : '--'} · KDJ ${Number.isFinite(h4.k) ? h4.k.toFixed(0) : '--'}/${Number.isFinite(h4.d) ? h4.d.toFixed(0) : '--'}/${Number.isFinite(h4.j) ? h4.j.toFixed(0) : '--'}`;
+  const label1 = !d1
+    ? '1d 背景未就绪'
+    : `${d1.overbought ? '1d 超买' : d1.macdBull ? '1d 多头' : '1d 空头'} · ${d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线非多头环境'}`;
+  return `<div class="ema-chip-row" aria-label="大周期背景">
+    <span class="ema-chip-label">背景</span>
+    <span class="ema-chip ${c4}" title="4h 作顺势/逆势过滤">${label4}</span>
+    <span class="ema-chip ${c1}" title="1d 只作文案环境，不当日内出场">${label1}</span>
   </div>`;
-}
-
-function macdKdjHeadline(view) {
-  if (!view) return '<span class="strategy-tag watch">MK --</span>';
-  const cls = macdKdjActionClass(view);
-  return `<span class="strategy-tag ${cls}" title="${escAttr(view.reason || '')}">MK ${view.actionLabel}</span>`;
 }
 
 function fmtBand(v) {
@@ -497,49 +497,61 @@ function escAttr(s) {
     .replace(/</g, '&lt;');
 }
 
+function emaMetric(label, valueHtml) {
+  return `<div class="ema-metric"><span class="ema-metric-k">${label}</span><span class="ema-metric-v">${valueHtml}</span></div>`;
+}
+
 function renderEmaTfCol(tf, row) {
   if (!row || !row.lastSignal) {
-    return `<div class="ema-tf-col"><span class="ema-tf">${tf}</span><div class="empty">K线未返回</div></div>`;
+    return `<div class="ema-tf-col is-empty"><div class="ema-tf-head"><span class="ema-tf">${tf}</span></div><div class="ema-empty">K线未返回</div></div>`;
   }
   const ls = row.lastSignal;
   const c = row.combined;
-  const reason = escAttr((c && c.reason) || '');
   const mk = row.macdKdjView || row.macdKdj;
-  return `<div class="ema-tf-col" title="${reason}">
-    <div class="ema-line"><span class="ema-tf">${tf}</span> ${combinedHtml(row)}</div>
-    <div class="ema-line">穿越 ${emaCrossHtml(ls)} ${ls.timeAgoText || ''}</div>
-    <div class="ema-line">过滤 ${emaFilterText(row)}</div>
-    <div class="ema-line">AT ${alphaHtml(row.alpha)}</div>
-    <div class="ema-line">布林 ${bbHtml(row.bb)}</div>
-    ${bbRailsHtml(row.bb)}
-    <div class="ema-line">中轴 ${bollMidHtml(row.bollMid)}</div>
-    <div class="ema-line">MACD+KDJ ${macdKdjHtml(mk)}</div>
-    ${mk && mk.reason ? `<div class="ema-hint">${mk.reason}</div>` : ''}
-    ${row.bb && row.bb.hint ? `<div class="ema-hint">${row.bb.hint}</div>` : ''}
+  const dir = combinedDir(row);
+  const reason = c && c.reason ? `<div class="ema-hint">${c.reason}</div>` : '';
+  const mkHint = mk && mk.reason ? `<div class="ema-hint">${mk.reason}</div>` : '';
+  const bbHint = row.bb && row.bb.hint ? `<div class="ema-hint">${row.bb.hint}</div>` : '';
+  const midHint = row.bollMid && row.bollMid.hint ? `<div class="ema-hint">${row.bollMid.hint}</div>` : '';
+  return `<div class="ema-tf-col dir-${dir}">
+    <div class="ema-tf-head">
+      <span class="ema-tf">${tf}</span>
+      ${combinedHtml(row)}
+    </div>
+    ${reason}
+    <div class="ema-metrics">
+      ${emaMetric('穿越', emaCrossHtml(ls))}
+      ${emaMetric('过滤', emaFilterText(row))}
+      ${emaMetric('AT', alphaHtml(row.alpha))}
+      ${emaMetric('布林', bbHtml(row.bb))}
+      ${row.bb ? emaMetric('轨道', bbRailsHtml(row.bb)) : ''}
+      ${emaMetric('中轴', bollMidHtml(row.bollMid))}
+      ${emaMetric('MK', macdKdjHtml(mk))}
+    </div>
+    ${mkHint}${bbHint}${midHint}
   </div>`;
 }
 
 function renderEmaCards(data) {
   const box = document.getElementById('emaCards');
   if (!box) return;
-  const coins = ['BTC', 'ETH', 'BNB', 'SOL', 'XAU'];
+  const coins = Object.keys(STRATEGY_SYMBOLS);
   box.innerHTML = coins.map((coin) => {
     const r15 = data && data['15m'] && data['15m'][coin];
     const r1h = data && data['1h'] && data['1h'][coin];
     const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || '';
-    const mk15 = r15 && (r15.macdKdjView || r15.macdKdj);
-    const mk1h = r1h && (r1h.macdKdjView || r1h.macdKdj);
-    return `<article class="ema-coin-card">
+    const d15 = combinedDir(r15);
+    const d1h = combinedDir(r1h);
+    const accent = d15 === d1h && d15 !== 'watch' ? d15 : (d1h !== 'watch' ? d1h : d15);
+    return `<article class="ema-coin-card accent-${accent}">
       <div class="ema-coin-head">
-        <div>
+        <div class="ema-coin-id">
           <h3>${coin}</h3>
           ${px ? `<div class="ema-coin-price">${px}</div>` : ''}
         </div>
-        <div class="ema-headlines">
-          <span>${combinedHtml(r15)} <span class="ema-tf">15m</span></span>
-          <span>${combinedHtml(r1h)} <span class="ema-tf">1h</span></span>
-          <span>${macdKdjHeadline(mk15)} <span class="ema-tf">15m</span></span>
-          <span>${macdKdjHeadline(mk1h)} <span class="ema-tf">1h</span></span>
+        <div class="ema-summary">
+          <div class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(r15)}</div>
+          <div class="ema-summary-item"><span class="ema-tf">1h</span>${combinedHtml(r1h)}</div>
         </div>
       </div>
       ${macdKdjBgHtml(data, coin)}

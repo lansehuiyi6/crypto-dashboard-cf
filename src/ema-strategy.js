@@ -21,6 +21,7 @@ const CG_IDS = {
   ETH: 'ethereum',
   BNB: 'binancecoin',
   SOL: 'solana',
+  XRP: 'ripple',
   XAU: 'pax-gold',
 };
 const CG = 'https://api.coingecko.com/api/v3';
