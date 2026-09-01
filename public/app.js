@@ -2,7 +2,9 @@ import {
   STRATEGY_SYMBOLS,
   evaluateEmaTrendStrategy,
   evaluateMacdKdjSignal,
+  evaluateAdx,
   annotateMacdKdjContext,
+  annotateKeltnerWithHtfAdx,
   attachAlphaTrend,
   toDominanceKlines,
   INTERVAL_MS,
@@ -476,6 +478,7 @@ function emptyBoard() {
     '1h': {},
     '4h': {},
     '1d': {},
+    adx4h: {},
     usdtD: {},
     source: 'browser',
     fetchedAt: Date.now(),
@@ -499,6 +502,38 @@ function enrichBoardMacdKdj(board) {
       const row = board[tf] && board[tf][coin];
       if (!row || !row.macdKdj) continue;
       row.macdKdjView = annotateMacdKdjContext(row.macdKdj, board['4h']?.[coin], board['1d']?.[coin]);
+    }
+  }
+  enrichBoardKeltnerAdx(board);
+}
+
+function enrichBoardKeltnerAdx(board) {
+  if (!board) return;
+  for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+    const row15 = board['15m'] && board['15m'][coin];
+    const row1h = board['1h'] && board['1h'][coin];
+    const adx1h = row1h && row1h.adx;
+    const adx4h = board.adx4h && board.adx4h[coin];
+
+    if (row15 && row15.keltner) {
+      // 15m 执行：过滤看 1h，背景看 4h
+      row15.keltner = annotateKeltnerWithHtfAdx(row15.keltner, {
+        filterAdx: adx1h,
+        filterTf: '1h',
+        bgAdx: adx4h,
+        bgTf: '4h',
+        localAdx: row15.adx,
+      });
+    }
+    if (row1h && row1h.keltner) {
+      // 1h 执行：过滤看 4h；本周期 1h ADX 作对照
+      row1h.keltner = annotateKeltnerWithHtfAdx(row1h.keltner, {
+        filterAdx: adx4h || adx1h,
+        filterTf: adx4h ? '4h' : '1h',
+        bgAdx: adx4h ? adx1h : null,
+        bgTf: adx4h ? '1h' : null,
+        localAdx: row1h.adx,
+      });
     }
   }
 }
@@ -526,6 +561,10 @@ function hydrateBoardFromCache(board) {
         if (mk) {
           board[interval][coin] = mk;
           hits += 1;
+        }
+        if (interval === '4h') {
+          const adx = evaluateAdx(cached, { interval: '4h' });
+          if (adx) board.adx4h[coin] = adx;
         }
       } catch { /* ignore */ }
     }
@@ -788,12 +827,21 @@ function keltnerTagClass(kc) {
 function keltnerHtml(kc) {
   if (!kc || !kc.ready) return '<span class="strategy-tag watch">--</span>';
   const cls = keltnerTagClass(kc);
-  const adx = kc.adx && Number.isFinite(kc.adx.adx) ? kc.adx.adx.toFixed(0) : '--';
-  const regime = kc.adx ? kc.adx.regimeLabel : '--';
+  const filter = kc.filterAdx && kc.filterTf
+    ? `${kc.filterTf} ADX${kc.filterAdx.adx.toFixed(0)} ${kc.filterAdx.regimeLabel}`
+    : (kc.adx && Number.isFinite(kc.adx.adx)
+      ? `ADX${kc.adx.adx.toFixed(0)} ${kc.adx.regimeLabel}`
+      : 'ADX--');
+  const local = kc.localAdx && kc.filterTf
+    ? ` · 本周期 ${kc.localAdx.adx.toFixed(0)} ${kc.localAdx.regimeLabel}`
+    : '';
+  const bg = kc.bgAdx && kc.bgTf
+    ? ` · ${kc.bgTf} ${kc.bgAdx.adx.toFixed(0)} ${kc.bgAdx.regimeLabel}`
+    : '';
   const mid = Number.isFinite(kc.midline) ? fmtBand(kc.midline) : '--';
   const ou = Number.isFinite(kc.outerUpper) ? fmtBand(kc.outerUpper) : '--';
   const ol = Number.isFinite(kc.outerLower) ? fmtBand(kc.outerLower) : '--';
-  return `<span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span><span class="ema-meta">ADX ${adx} ${regime} · 中 ${mid} · 外 ${ol}/${ou}</span>`;
+  return `<span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span><span class="ema-meta">${filter}${local}${bg} · 中 ${mid} · 外 ${ol}/${ou}</span>`;
 }
 
 function macdKdjBgHtml(board, coin) {
@@ -1022,6 +1070,10 @@ async function loadEmaStrategy(force = false) {
           const mk = macdKdjFromKlines(klines, coin, interval);
           board[interval][coin] = mk;
           if (!mk) board.errors.push(coin + ' ' + interval + ': MACD+KDJ 不足');
+          if (interval === '4h') {
+            const adx = evaluateAdx(klines, { interval: '4h' });
+            if (adx) board.adx4h[coin] = adx;
+          }
           board.cached = false;
           board.fetchedAt = Date.now();
           paintEmaBoard(board);
@@ -1238,8 +1290,15 @@ function stratKeyFromCoin(coin) {
   return coin;
 }
 
-function clientEssay(tfLabel, ema, s1, r1) {
-  if (!ema) return `${tfLabel}K 线还没到位。先按现价观察，支撑看 ${s1 || '--'}，阻力看 ${r1 || '--'}，不要追单。`;
+function scBlock(title, body) {
+  if (!body) return '';
+  return `<div class="sc-block"><div class="sc-block-h">${title}</div><div class="sc-block-b">${body}</div></div>`;
+}
+
+function clientEssayHtml(tfLabel, ema, s1, r1) {
+  if (!ema) {
+    return scBlock('状态', `${tfLabel} K 线还没到位。先按现价观察，支撑看 ${s1 || '--'}，阻力看 ${r1 || '--'}，不要追单。`);
+  }
   const ls = ema.lastSignal;
   let cross = '未见有效的 EMA7 穿越 EMA56。';
   if (ls) {
@@ -1248,14 +1307,14 @@ function clientEssay(tfLabel, ema, s1, r1) {
       : `最近一次信号是 ${ls.label}，发生在${ls.timeAgoText}，当时价 ${ls.priceText}。`;
   }
   const macd = ema.macdAboveZero ? 'MACD 在 0 轴上方，多头动能还在。' : 'MACD 在 0 轴下方，空头动能占优。';
-  let rsi = 'RSI 数据不足';
+  let rsi = 'RSI 数据不足。';
   if (Number.isFinite(Number(ema.rsi6))) {
     const v = Number(ema.rsi6);
-    if (v >= 70) rsi = `RSI6 在 ${v.toFixed(0)}，短线超买，不宜追多`;
-    else if (v >= 65) rsi = `RSI6 在 ${v.toFixed(0)}，接近超买，多单要等回踩`;
-    else if (v <= 30) rsi = `RSI6 在 ${v.toFixed(0)}，短线超卖，不宜追空`;
-    else if (v <= 35) rsi = `RSI6 在 ${v.toFixed(0)}，动能偏低，空单需谨慎`;
-    else rsi = `RSI6 在 ${v.toFixed(0)}，未到极端区`;
+    if (v >= 70) rsi = `RSI6 在 ${v.toFixed(0)}，短线超买，不宜追多。`;
+    else if (v >= 65) rsi = `RSI6 在 ${v.toFixed(0)}，接近超买，多单要等回踩。`;
+    else if (v <= 30) rsi = `RSI6 在 ${v.toFixed(0)}，短线超卖，不宜追空。`;
+    else if (v <= 35) rsi = `RSI6 在 ${v.toFixed(0)}，动能偏低，空单需谨慎。`;
+    else rsi = `RSI6 在 ${v.toFixed(0)}，未到极端区。`;
   }
   const align = ema.trendLabel || '均线纠缠';
   let action;
@@ -1266,17 +1325,39 @@ function clientEssay(tfLabel, ema, s1, r1) {
   } else {
     action = `穿越、MACD 同向、RSI 不极端尚未同时成立，这个周期先观望：多等回踩 ${s1}，空等反抽 ${r1}。`;
   }
+
   const at = ema.alpha;
-  let atText = '';
-  if (at) {
-    atText = `AlphaTrend ${at.stateLabel}，${at.lastEventLabel}。`;
-  }
   const bb = ema.bb;
-  const bbText = bb ? `布林${bb.widthLabel}，价格${bb.zoneLabel}（%B ${bb.pctB.toFixed(2)}）。${bb.hint}。` : '';
   const bm = ema.bollMid;
-  const bmText = bm ? `中轴策略：${bm.hint}` : '';
-  const comb = ema.combined ? `合成：${ema.combined.label}（${ema.combined.reason}）。` : '';
-  return `${tfLabel}目前是${align}。${cross}${macd}${rsi}。${atText}${bbText}${bmText}${action}${comb}`;
+  const mk = ema.macdKdjView || ema.macdKdj;
+  const kc = ema.keltner;
+  const comb = ema.combined;
+
+  const parts = [
+    scBlock('趋势', `${tfLabel}目前是${align}。${cross}`),
+    scBlock('过滤', `${macd}${rsi}`),
+  ];
+  if (at) {
+    parts.push(scBlock('AT', `AlphaTrend ${at.stateLabel}${at.lastEventLabel ? '，' + at.lastEventLabel : ''}。`));
+  }
+  if (bb) {
+    parts.push(scBlock('布林', `${bb.widthLabel}，价格${bb.zoneLabel}（%B ${Number.isFinite(bb.pctB) ? bb.pctB.toFixed(2) : '--'}）。${bb.hint || ''}`));
+  }
+  if (bm) {
+    parts.push(scBlock('中轴', bm.hint || bm.setupLabel || '--'));
+  }
+  if (mk) {
+    const mkLabel = mk.actionLabel || mk.stateLabel || '观望';
+    parts.push(scBlock('MK', `${mkLabel}${mk.reason ? '。' + mk.reason : ''}`));
+  }
+  if (kc && kc.ready) {
+    parts.push(scBlock('KC', `${kc.stateLabel}。${kc.regimeNote || kc.hint || ''}`));
+  }
+  if (comb) {
+    parts.push(scBlock('合成', `<span class="strategy-tag ${comb.dir === 'long' ? 'long' : comb.dir === 'short' ? 'short' : 'watch'}">${comb.label}</span> ${comb.reason || ''}`));
+  }
+  parts.push(scBlock('操作', action));
+  return parts.join('');
 }
 
 function renderShortSignalCards() {
@@ -1294,8 +1375,8 @@ function renderShortSignalCards() {
     const e1h = (lastEmaBoard && lastEmaBoard['1h'] && lastEmaBoard['1h'][k]) || s.ema1h;
     const s1 = (s.support || '').split(' -> ')[0];
     const r1 = (s.resistance || '').split(' -> ')[0];
-    const a15 = clientEssay('15 分钟', e15, s1, r1);
-    const a1h = clientEssay('1 小时', e1h, s1, r1);
+    const a15 = clientEssayHtml('15 分钟', e15, s1, r1);
+    const a1h = clientEssayHtml('1 小时', e1h, s1, r1);
     const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
     const ls15 = e15 && e15.lastSignal;
     const ls1h = e1h && e1h.lastSignal;
@@ -1322,11 +1403,11 @@ function renderShortSignalCards() {
         <div class="sc-tf-grid">
           <div class="sc-tf">
             <div class="sc-tf-h"><span class="ema-tf">15m</span>${emaCrossHtml(ls15)}</div>
-            <p>${a15}</p>
+            <div class="sc-essay">${a15}</div>
           </div>
           <div class="sc-tf">
             <div class="sc-tf-h"><span class="ema-tf">1h</span>${emaCrossHtml(ls1h)}</div>
-            <p>${a1h}</p>
+            <div class="sc-essay">${a1h}</div>
           </div>
         </div>
       </div>`;

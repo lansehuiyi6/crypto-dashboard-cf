@@ -5,7 +5,9 @@ import {
   STRATEGY_SYMBOLS,
   evaluateEmaTrendStrategy,
   evaluateMacdKdjSignal,
+  evaluateAdx,
   annotateMacdKdjContext,
+  annotateKeltnerWithHtfAdx,
   attachAlphaTrend,
   resampleLast,
   toDominanceKlines,
@@ -71,6 +73,33 @@ async function fetchCgKlines(coin, interval) {
   return sampled.map(([t, p]) => [t, p, p, p, p, 0]);
 }
 
+function enrichBoardKeltnerAdx(board) {
+  for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+    const row15 = board['15m'] && board['15m'][coin];
+    const row1h = board['1h'] && board['1h'][coin];
+    const adx1h = row1h && row1h.adx;
+    const adx4h = board.adx4h && board.adx4h[coin];
+    if (row15 && row15.keltner) {
+      row15.keltner = annotateKeltnerWithHtfAdx(row15.keltner, {
+        filterAdx: adx1h,
+        filterTf: '1h',
+        bgAdx: adx4h,
+        bgTf: '4h',
+        localAdx: row15.adx,
+      });
+    }
+    if (row1h && row1h.keltner) {
+      row1h.keltner = annotateKeltnerWithHtfAdx(row1h.keltner, {
+        filterAdx: adx4h || adx1h,
+        filterTf: adx4h ? '4h' : '1h',
+        bgAdx: adx4h ? adx1h : null,
+        bgTf: adx4h ? '1h' : null,
+        localAdx: row1h.adx,
+      });
+    }
+  }
+}
+
 function enrichBoardMacdKdj(board) {
   for (const tf of EXEC_INTERVALS) {
     for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
@@ -79,6 +108,7 @@ function enrichBoardMacdKdj(board) {
       row.macdKdjView = annotateMacdKdjContext(row.macdKdj, board['4h']?.[coin], board['1d']?.[coin]);
     }
   }
+  enrichBoardKeltnerAdx(board);
   return board;
 }
 
@@ -88,6 +118,7 @@ export function normalizeBoard(raw) {
     '1h': {},
     '4h': {},
     '1d': {},
+    adx4h: {},
     usdtD: { '15m': null, '1h': null },
   };
   if (!raw || typeof raw !== 'object') return empty;
@@ -97,6 +128,7 @@ export function normalizeBoard(raw) {
       '1h': raw['1h'] && typeof raw['1h'] === 'object' ? raw['1h'] : {},
       '4h': raw['4h'] && typeof raw['4h'] === 'object' ? raw['4h'] : {},
       '1d': raw['1d'] && typeof raw['1d'] === 'object' ? raw['1d'] : {},
+      adx4h: raw.adx4h && typeof raw.adx4h === 'object' ? raw.adx4h : {},
       usdtD: raw.usdtD && typeof raw.usdtD === 'object' ? raw.usdtD : empty.usdtD,
       errors: raw.errors || [],
     };
@@ -128,6 +160,7 @@ function mergeBoards(live, cached) {
     '1h': { ...b['1h'] },
     '4h': { ...b['4h'] },
     '1d': { ...b['1d'] },
+    adx4h: { ...(b.adx4h || {}) },
     usdtD: { ...b.usdtD },
     errors: a.errors || [],
   };
@@ -140,6 +173,9 @@ function mergeBoards(live, cached) {
     for (const [coin, row] of Object.entries(a[tf] || {})) {
       if (row && row.ready) out[tf][coin] = row;
     }
+  }
+  for (const [coin, adx] of Object.entries(a.adx4h || {})) {
+    if (adx) out.adx4h[coin] = adx;
   }
   if (a.usdtD?.['1h']?.lastSignal) out.usdtD['1h'] = a.usdtD['1h'];
   if (a.usdtD?.['15m']?.lastSignal) out.usdtD['15m'] = a.usdtD['15m'];
@@ -196,6 +232,7 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
     '1h': {},
     '4h': {},
     '1d': {},
+    adx4h: {},
     usdtD: { '15m': null, '1h': null },
     errors: [],
   };
@@ -215,6 +252,10 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
           if (isHtf) {
             board[interval][coin] = evaluateMacdKdjSignal(klines, coin, { interval });
             if (!board[interval][coin]) board.errors.push(`${coin} ${interval}: MACD+KDJ 不足`);
+            if (interval === '4h') {
+              const adx = evaluateAdx(klines, { interval: '4h' });
+              if (adx) board.adx4h[coin] = adx;
+            }
           } else {
             const row = evaluateEmaTrendStrategy(klines, coin, { interval });
             board[interval][coin] = row ? attachAlphaTrend(row, klines, { interval }) : null;

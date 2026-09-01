@@ -1624,6 +1624,86 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
   };
 }
 
+/**
+ * 用更高周期 ADX 给 Keltner 定「单边/震荡」过滤。
+ * 15m 执行 → 过滤看 1h，背景看 4h；
+ * 1h 执行 → 过滤看 4h，本周期 1h ADX 作对照。
+ */
+export function annotateKeltnerWithHtfAdx(kc, opts = {}) {
+  if (!kc || !kc.ready) return kc;
+  const filterAdx = opts.filterAdx || null;
+  const filterTf = opts.filterTf || '';
+  const bgAdx = opts.bgAdx || null;
+  const bgTf = opts.bgTf || '';
+  const localAdx = opts.localAdx || kc.adx || null;
+
+  const primary = filterAdx || localAdx;
+  const hostile = !!(primary && primary.hostileToReversion);
+  const friendly = !!(primary && primary.friendlyToReversion);
+  const phase = kc.phase || 'idle';
+
+  let stateLabel = String(kc.stateLabel || '观望')
+    .replace(/·单边慎用$/g, '')
+    .replace(/·震荡友好$/g, '');
+  // 去掉旧 regime 后缀后再重打
+  let confidence = 'normal';
+  const bits = [];
+  if (primary && filterTf) {
+    bits.push(`过滤 ${filterTf} ADX${primary.adx.toFixed(0)} ${primary.regimeLabel}`);
+  } else if (primary) {
+    bits.push(`ADX${primary.adx.toFixed(0)} ${primary.regimeLabel}`);
+  } else {
+    bits.push('ADX过滤未就绪');
+  }
+  if (localAdx && filterTf && filterAdx) {
+    bits.push(`本周期 ADX${localAdx.adx.toFixed(0)} ${localAdx.regimeLabel}`);
+  }
+  if (bgAdx && bgTf) {
+    bits.push(`背景 ${bgTf} ADX${bgAdx.adx.toFixed(0)} ${bgAdx.regimeLabel}`);
+  }
+
+  let regimeNote = bits.join(' · ');
+  if (hostile) {
+    confidence = 'low';
+    regimeNote += '：高周期偏单边，回归易逆势挨打';
+    if (phase !== 'idle') stateLabel = `${stateLabel}·单边慎用`;
+  } else if (friendly && phase !== 'idle') {
+    confidence = 'high';
+    stateLabel = `${stateLabel}·震荡友好`;
+    regimeNote += '：高周期偏震荡，回归更友好';
+  } else if (!hostile && bgAdx && bgAdx.hostileToReversion && phase !== 'idle') {
+    confidence = 'low';
+    stateLabel = `${stateLabel}·大周期单边`;
+    regimeNote += '：过滤周期尚可，但更大周期偏单边，宜降权';
+  }
+
+  const hintBase = hostile
+    ? `高周期 ADX 显示单边，Keltner 回归宜降权或跳过。`
+    : phase === 'armed_long'
+      ? `已刺破外下轨武装，等回踩内下轨入多；中轨止盈、外下止损。`
+      : phase === 'armed_short'
+        ? `已刺破外上轨武装，等回踩内上轨入空；中轨止盈、外上止损。`
+        : phase === 'in_long'
+          ? `持有多：触及中轨止盈，跌破外下止损。`
+          : phase === 'in_short'
+            ? `持有空：触及中轨止盈，升破外上止损。`
+            : `双层 Keltner 回归（独立层，不进共振）。`;
+
+  return {
+    ...kc,
+    adx: primary || localAdx,
+    localAdx,
+    filterAdx,
+    filterTf,
+    bgAdx,
+    bgTf,
+    confidence,
+    stateLabel,
+    regimeNote,
+    hint: `${hintBase}${regimeNote}`,
+  };
+}
+
 export function attachAlphaTrend(ema, klines, opts = {}) {
   if (!ema) return null;
   const at = evaluateAlphaTrend(klines, ema.coin, opts);
@@ -1632,6 +1712,7 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   ema.bollMid = evaluateBollMidStrategy(klines, ema.coin, opts);
   ema.macdKdj = evaluateMacdKdjSignal(klines, ema.coin, opts);
   ema.adx = evaluateAdx(klines, opts);
+  // 先用本周期 ADX 算出状态机；看板 enrich 时再叠高周期过滤
   ema.keltner = evaluateDualKeltnerReversion(klines, ema.coin, { ...opts, adx: ema.adx });
   ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
   return ema;
