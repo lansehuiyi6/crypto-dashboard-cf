@@ -10,6 +10,8 @@ import {
   HTF_INTERVALS,
 } from './ema-core.js';
 
+const KLINE_LIMIT = 160;
+
 
 const COINGECKO_IDS = {
   bitcoin:     { el: 'btc',  name: 'BTC' },
@@ -222,6 +224,7 @@ function snapshotEmaAlerts(board) {
       const c = row.combined || {};
       const mk = row.macdKdjView || row.macdKdj || {};
       const bm = row.bollMid || {};
+      const kc = row.keltner || {};
       out[`${coin}|${tf}|combined`] = {
         kind: 'combined',
         coin,
@@ -252,6 +255,18 @@ function snapshotEmaAlerts(board) {
         reason: bm.hint || '',
         active: bm.setup === 'long' || bm.setup === 'short',
       };
+      out[`${coin}|${tf}|keltner`] = {
+        kind: 'keltner',
+        coin,
+        tf,
+        dir: kc.dir || 'watch',
+        label: kc.stateLabel || 'Keltner观望',
+        reason: kc.hint || kc.regimeNote || '',
+        active: !!(kc.longEntry || kc.shortEntry || kc.longTp || kc.longSl || kc.shortTp || kc.shortSl
+          || kc.phase === 'armed_long' || kc.phase === 'armed_short'
+          || kc.phase === 'in_long' || kc.phase === 'in_short'),
+        edge: kc.edge || '',
+      };
     }
   }
   return out;
@@ -261,6 +276,7 @@ function notifyKindTitle(kind) {
   if (kind === 'combined') return '共振/合成';
   if (kind === 'mk') return 'MACD+KDJ';
   if (kind === 'mid') return '中轴';
+  if (kind === 'keltner') return 'Keltner回归';
   return '策略';
 }
 
@@ -283,7 +299,15 @@ function shouldEmitAlert(prev, next) {
     || prev.edge !== next.edge
     || !prev.active;
   if (!changed) return null;
-  const edgeTxt = next.edge === 'entry' ? '入场边沿' : next.edge === 'exit' ? '离场边沿' : '';
+  const edgeTxt = next.edge === 'entry'
+    ? '入场'
+    : next.edge === 'exit'
+      ? '离场'
+      : next.edge === 'tp'
+        ? '止盈'
+        : next.edge === 'sl'
+          ? '止损'
+          : '';
   return {
     title: `${next.coin} ${next.tf} · ${notifyKindTitle(next.kind)}${edgeTxt ? ' ' + edgeTxt : ''}`,
     body: `${next.label}${next.reason ? ' — ' + next.reason : ''}`,
@@ -378,7 +402,7 @@ function updateNotifyUi() {
     btn.classList.add('on');
     btn.textContent = '通知已开启';
     if (testBtn) testBtn.hidden = false;
-    status.textContent = '共振 / 中轴 / MK 边沿变化会提醒 · 需保持页面开启';
+    status.textContent = '共振 / 中轴 / MK / Keltner 变化会提醒 · 需保持页面开启';
   } else {
     btn.classList.remove('on');
     btn.textContent = '开启浏览器通知';
@@ -516,9 +540,9 @@ function hydrateBoardFromCache(board) {
 async function fetchKlinesClient(symbol, interval) {
   const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
   const hosts = [
-    (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${interval}&limit=120`,
-    (s) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${interval}&limit=120`,
-    (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${interval}&limit=120`,
+    (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${interval}&limit=${KLINE_LIMIT}`,
+    (s) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${interval}&limit=${KLINE_LIMIT}`,
+    (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${interval}&limit=${KLINE_LIMIT}`,
   ];
   for (const sym of aliases) {
     for (const make of hosts) {
@@ -526,7 +550,7 @@ async function fetchKlinesClient(symbol, interval) {
         const res = await fetch(make(sym));
         if (!res.ok) continue;
         const data = await res.json();
-        if (Array.isArray(data) && data.length >= 80) return data;
+        if (Array.isArray(data) && data.length >= 100) return data;
       } catch { /* next host */ }
     }
   }
@@ -753,6 +777,25 @@ function macdKdjHtml(view) {
   return `<span class="strategy-tag ${cls}" title="${escAttr(view.reason || '')}">${view.actionLabel}</span><span class="ema-meta">Hist ${hist} · KDJ ${k}/${d}/${j}${edge}</span>`;
 }
 
+function keltnerTagClass(kc) {
+  if (!kc) return 'watch';
+  if (kc.confidence === 'low') return 'watch';
+  if (kc.dir === 'long') return 'long';
+  if (kc.dir === 'short') return 'short';
+  return 'watch';
+}
+
+function keltnerHtml(kc) {
+  if (!kc || !kc.ready) return '<span class="strategy-tag watch">--</span>';
+  const cls = keltnerTagClass(kc);
+  const adx = kc.adx && Number.isFinite(kc.adx.adx) ? kc.adx.adx.toFixed(0) : '--';
+  const regime = kc.adx ? kc.adx.regimeLabel : '--';
+  const mid = Number.isFinite(kc.midline) ? fmtBand(kc.midline) : '--';
+  const ou = Number.isFinite(kc.outerUpper) ? fmtBand(kc.outerUpper) : '--';
+  const ol = Number.isFinite(kc.outerLower) ? fmtBand(kc.outerLower) : '--';
+  return `<span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span><span class="ema-meta">ADX ${adx} ${regime} · 中 ${mid} · 外 ${ol}/${ou}</span>`;
+}
+
 function macdKdjBgHtml(board, coin) {
   const h4 = board && board['4h'] && board['4h'][coin];
   const d1 = board && board['1d'] && board['1d'][coin];
@@ -807,11 +850,13 @@ function renderEmaTfCol(tf, row) {
   const ls = row.lastSignal;
   const c = row.combined;
   const mk = row.macdKdjView || row.macdKdj;
+  const kc = row.keltner;
   const dir = combinedDir(row);
   const reason = c && c.reason ? `<div class="ema-hint">${c.reason}</div>` : '';
   const mkHint = mk && mk.reason ? `<div class="ema-hint">${mk.reason}</div>` : '';
   const bbHint = row.bb && row.bb.hint ? `<div class="ema-hint">${row.bb.hint}</div>` : '';
   const midHint = row.bollMid && row.bollMid.hint ? `<div class="ema-hint">${row.bollMid.hint}</div>` : '';
+  const kcHint = kc && kc.hint ? `<div class="ema-hint">${kc.hint}</div>` : '';
   return `<div class="ema-tf-col dir-${dir}">
     <div class="ema-tf-head">
       <span class="ema-tf">${tf}</span>
@@ -826,8 +871,9 @@ function renderEmaTfCol(tf, row) {
       ${row.bb ? emaMetric('轨道', bbRailsHtml(row.bb)) : ''}
       ${emaMetric('中轴', bollMidHtml(row.bollMid))}
       ${emaMetric('MK', macdKdjHtml(mk))}
+      ${emaMetric('KC', keltnerHtml(kc))}
     </div>
-    ${mkHint}${bbHint}${midHint}
+    ${mkHint}${bbHint}${midHint}${kcHint}
   </div>`;
 }
 

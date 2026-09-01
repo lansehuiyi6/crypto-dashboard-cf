@@ -172,6 +172,17 @@ function calcEwmSpan(values, span) {
   return calcEwmAlpha(values, 2 / (s + 1));
 }
 
+/** pandas ewm(..., min_periods=N)：前 N-1 根输出为空 */
+function calcEwmSpanMinPeriods(values, span, minPeriods) {
+  const raw = calcEwmSpan(values, span);
+  if (!raw) return null;
+  const mp = Math.max(intParam(minPeriods, 0), 0);
+  if (mp <= 1) return raw;
+  const out = raw.slice();
+  for (let i = 0; i < Math.min(mp - 1, out.length); i++) out[i] = null;
+  return out;
+}
+
 function rollingExtremum(values, period, mode) {
   const n = values.length;
   const out = new Array(n).fill(null);
@@ -1210,6 +1221,409 @@ export function evaluateBollMidStrategy(klines, coin = '', opts = {}) {
   };
 }
 
+/**
+ * Wilder ADX：判断单边(趋势) vs 震荡。
+ * ADX 高 → 单边，均值回归（Keltner）容易逆势挨打；ADX 低 → 震荡，回归更友好。
+ */
+export function evaluateAdx(klines, opts = {}) {
+  const period = Math.max(intParam(opts.adx_period ?? opts.period, 14), 2);
+  if (!klines || klines.length < period * 2 + 2) return null;
+
+  const n = klines.length;
+  const high = new Array(n);
+  const low = new Array(n);
+  const close = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = klines[i];
+    high[i] = Array.isArray(k) ? Number(k[2]) : Number(k.h);
+    low[i] = Array.isArray(k) ? Number(k[3]) : Number(k.l);
+    close[i] = Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close);
+  }
+
+  const tr = new Array(n).fill(null);
+  const plusDm = new Array(n).fill(0);
+  const minusDm = new Array(n).fill(0);
+  tr[0] = high[0] - low[0];
+  for (let i = 1; i < n; i++) {
+    const up = high[i] - high[i - 1];
+    const down = low[i - 1] - low[i];
+    plusDm[i] = up > down && up > 0 ? up : 0;
+    minusDm[i] = down > up && down > 0 ? down : 0;
+    tr[i] = Math.max(
+      high[i] - low[i],
+      Math.abs(high[i] - close[i - 1]),
+      Math.abs(low[i] - close[i - 1]),
+    );
+  }
+
+  const atr = calcRMA(tr, period);
+  const smPlus = calcRMA(plusDm, period);
+  const smMinus = calcRMA(minusDm, period);
+  if (!atr || !smPlus || !smMinus) return null;
+
+  const dx = new Array(n).fill(null);
+  const plusDi = new Array(n).fill(null);
+  const minusDi = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (atr[i] == null || smPlus[i] == null || smMinus[i] == null || atr[i] === 0) continue;
+    const pdi = (100 * smPlus[i]) / atr[i];
+    const mdi = (100 * smMinus[i]) / atr[i];
+    plusDi[i] = pdi;
+    minusDi[i] = mdi;
+    const sum = pdi + mdi;
+    dx[i] = sum === 0 ? 0 : (100 * Math.abs(pdi - mdi)) / sum;
+  }
+
+  // DX 前段多为 null，RMA 需从首个有效 DX 起算：把 null 当跳过，压缩对齐
+  const firstDx = dx.findIndex((v) => v != null);
+  if (firstDx < 0) return null;
+  const dxCompact = dx.slice(firstDx);
+  const adxCompact = calcRMA(dxCompact, period);
+  const adx = new Array(n).fill(null);
+  if (adxCompact) {
+    for (let j = 0; j < adxCompact.length; j++) adx[firstDx + j] = adxCompact[j];
+  }
+
+  const i = n - 1;
+  const adxNow = adx[i];
+  const pdiNow = plusDi[i];
+  const mdiNow = minusDi[i];
+  if (adxNow == null) return null;
+
+  const trendStrong = Number(opts.adx_trend ?? 25);
+  const rangeMax = Number(opts.adx_range ?? 20);
+  let regime = 'mixed';
+  let regimeLabel = '过渡';
+  if (adxNow >= trendStrong) {
+    regime = 'trend';
+    regimeLabel = '单边';
+  } else if (adxNow < rangeMax) {
+    regime = 'range';
+    regimeLabel = '震荡';
+  }
+
+  return {
+    period,
+    adx: adxNow,
+    plusDi: pdiNow,
+    minusDi: mdiNow,
+    regime,
+    regimeLabel,
+    trendStrong,
+    rangeMax,
+    hostileToReversion: regime === 'trend',
+    friendlyToReversion: regime === 'range',
+    diBias: pdiNow != null && mdiNow != null
+      ? (pdiNow > mdiNow ? 'bull' : pdiNow < mdiNow ? 'bear' : 'flat')
+      : null,
+  };
+}
+
+/**
+ * Dual Keltner Reversion 5-Line
+ * 外轨刺破武装 → 内轨回踩入场 → 中轨止盈 / 外轨止损；不参与共振合成。
+ * 注：脚本参数 inner 倍数 > outer，内轨实际离中轴更远。
+ */
+export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
+  const interval = opts.interval || '1h';
+  const kcLength = Math.max(intParam(opts.kc_length, 88), 2);
+  const atrMultOuter = Number.isFinite(Number(opts.atr_mult_outer)) ? Number(opts.atr_mult_outer) : 2.8125;
+  const atrMultInner = Number.isFinite(Number(opts.atr_mult_inner)) ? Number(opts.atr_mult_inner) : 3.375;
+  const setupExpiry = Math.max(intParam(opts.setup_expiry, 20), 1);
+  const adx = opts.adx || evaluateAdx(klines, opts);
+
+  if (!klines || klines.length < kcLength + 5) return null;
+
+  const n = klines.length;
+  const closes = new Array(n);
+  const highs = new Array(n);
+  const lows = new Array(n);
+  const times = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = klines[i];
+    times[i] = Array.isArray(k) ? Number(k[0]) : Number(k.t || 0);
+    highs[i] = Array.isArray(k) ? Number(k[2]) : Number(k.h);
+    lows[i] = Array.isArray(k) ? Number(k[3]) : Number(k.l);
+    closes[i] = Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close);
+  }
+
+  const tr = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (i === 0) {
+      tr[i] = highs[i] - lows[i];
+      continue;
+    }
+    tr[i] = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1]),
+    );
+  }
+
+  const midline = calcEwmSpanMinPeriods(closes, kcLength, kcLength);
+  const atr = calcEwmSpanMinPeriods(tr, kcLength, kcLength);
+  if (!midline || !atr) return null;
+
+  const outerUpper = new Array(n).fill(null);
+  const innerUpper = new Array(n).fill(null);
+  const innerLower = new Array(n).fill(null);
+  const outerLower = new Array(n).fill(null);
+  const valid = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    if (midline[i] == null || atr[i] == null) continue;
+    outerUpper[i] = midline[i] + atr[i] * atrMultOuter;
+    innerUpper[i] = midline[i] + atr[i] * atrMultInner;
+    innerLower[i] = midline[i] - atr[i] * atrMultInner;
+    outerLower[i] = midline[i] - atr[i] * atrMultOuter;
+    valid[i] = true;
+  }
+
+  const longEntry = new Array(n).fill(false);
+  const shortEntry = new Array(n).fill(false);
+  const longTp = new Array(n).fill(false);
+  const longSl = new Array(n).fill(false);
+  const shortTp = new Array(n).fill(false);
+  const shortSl = new Array(n).fill(false);
+  const armedLongFlags = new Array(n).fill(false);
+  const armedShortFlags = new Array(n).fill(false);
+
+  let state = 0;
+  let armedLong = false;
+  let armedShort = false;
+  let armedLongBars = 0;
+  let armedShortBars = 0;
+
+  for (let i = 0; i < n; i++) {
+    if (!valid[i]) continue;
+
+    if (state === 1) {
+      if (highs[i] >= midline[i]) {
+        longTp[i] = true;
+        state = 0;
+        armedLong = false;
+        armedShort = false;
+        armedLongBars = 0;
+        armedShortBars = 0;
+      } else if (lows[i] <= outerLower[i]) {
+        longSl[i] = true;
+        state = 0;
+        armedLong = false;
+        armedShort = false;
+        armedLongBars = 0;
+        armedShortBars = 0;
+      }
+      continue;
+    }
+
+    if (state === -1) {
+      if (lows[i] <= midline[i]) {
+        shortTp[i] = true;
+        state = 0;
+        armedLong = false;
+        armedShort = false;
+        armedLongBars = 0;
+        armedShortBars = 0;
+      } else if (highs[i] >= outerUpper[i]) {
+        shortSl[i] = true;
+        state = 0;
+        armedLong = false;
+        armedShort = false;
+        armedLongBars = 0;
+        armedShortBars = 0;
+      }
+      continue;
+    }
+
+    const prevClose = i > 0 ? closes[i - 1] : null;
+    const ouPrev = i > 0 ? outerUpper[i - 1] : null;
+    const olPrev = i > 0 ? outerLower[i - 1] : null;
+
+    const crossBelowOuterLower = olPrev != null && prevClose != null
+      && lows[i] < outerLower[i] && prevClose >= olPrev;
+    const crossAboveOuterUpper = ouPrev != null && prevClose != null
+      && highs[i] > outerUpper[i] && prevClose <= ouPrev;
+
+    if (crossBelowOuterLower) {
+      armedLong = true;
+      armedLongBars = 0;
+      armedShort = false;
+      armedShortBars = 0;
+    }
+    if (crossAboveOuterUpper) {
+      armedShort = true;
+      armedShortBars = 0;
+      armedLong = false;
+      armedLongBars = 0;
+    }
+
+    if (armedLong) {
+      armedLongFlags[i] = true;
+      armedLongBars += 1;
+      if (highs[i] >= innerLower[i]) {
+        longEntry[i] = true;
+        state = 1;
+        armedLong = false;
+        armedShort = false;
+        armedLongBars = 0;
+        armedShortBars = 0;
+        continue;
+      }
+      if (armedLongBars > setupExpiry) {
+        armedLong = false;
+        armedLongBars = 0;
+      }
+    }
+
+    if (armedShort) {
+      armedShortFlags[i] = true;
+      armedShortBars += 1;
+      if (lows[i] <= innerUpper[i]) {
+        shortEntry[i] = true;
+        state = -1;
+        armedShort = false;
+        armedLong = false;
+        armedShortBars = 0;
+        armedLongBars = 0;
+        continue;
+      }
+      if (armedShortBars > setupExpiry) {
+        armedShort = false;
+        armedShortBars = 0;
+      }
+    }
+  }
+
+  const i = n - 1;
+  if (!valid[i]) return null;
+
+  const hostile = !!(adx && adx.hostileToReversion);
+  const friendly = !!(adx && adx.friendlyToReversion);
+
+  let phase = 'idle';
+  let stateLabel = '观望';
+  let dir = 'watch';
+  if (longEntry[i]) {
+    phase = 'long_entry';
+    stateLabel = '多入场';
+    dir = 'long';
+  } else if (shortEntry[i]) {
+    phase = 'short_entry';
+    stateLabel = '空入场';
+    dir = 'short';
+  } else if (longTp[i]) {
+    phase = 'long_tp';
+    stateLabel = '多止盈';
+    dir = 'long';
+  } else if (longSl[i]) {
+    phase = 'long_sl';
+    stateLabel = '多止损';
+    dir = 'short';
+  } else if (shortTp[i]) {
+    phase = 'short_tp';
+    stateLabel = '空止盈';
+    dir = 'short';
+  } else if (shortSl[i]) {
+    phase = 'short_sl';
+    stateLabel = '空止损';
+    dir = 'long';
+  } else if (state === 1) {
+    phase = 'in_long';
+    stateLabel = '持有多';
+    dir = 'long';
+  } else if (state === -1) {
+    phase = 'in_short';
+    stateLabel = '持有空';
+    dir = 'short';
+  } else if (armedLongFlags[i] || armedLong) {
+    phase = 'armed_long';
+    stateLabel = `武装多·剩${Math.max(setupExpiry - armedLongBars, 0)}根`;
+    dir = 'long';
+  } else if (armedShortFlags[i] || armedShort) {
+    phase = 'armed_short';
+    stateLabel = `武装空·剩${Math.max(setupExpiry - armedShortBars, 0)}根`;
+    dir = 'short';
+  }
+
+  let confidence = 'normal';
+  let regimeNote = adx
+    ? `ADX${adx.adx.toFixed(0)} ${adx.regimeLabel}`
+    : 'ADX未就绪';
+  if (hostile) {
+    confidence = 'low';
+    regimeNote = `${regimeNote}：单边市回归策略易逆势挨打`;
+    if (phase !== 'idle') stateLabel = `${stateLabel}·单边慎用`;
+  } else if (friendly && phase !== 'idle') {
+    confidence = 'high';
+    stateLabel = `${stateLabel}·震荡友好`;
+    regimeNote = `${regimeNote}：震荡环境更适合回归`;
+  }
+
+  const lastLongEntryIdx = findLastTrue(longEntry, i);
+  const lastShortEntryIdx = findLastTrue(shortEntry, i);
+  const edge = longEntry[i] || shortEntry[i]
+    ? 'entry'
+    : longTp[i] || shortTp[i]
+      ? 'tp'
+      : longSl[i] || shortSl[i]
+        ? 'sl'
+        : '';
+
+  return {
+    coin,
+    interval,
+    name: 'Dual Keltner Reversion 5-Line',
+    ready: true,
+    phase,
+    stateLabel,
+    dir,
+    confidence,
+    edge,
+    position: state,
+    armedLong: !!(armedLongFlags[i] || armedLong),
+    armedShort: !!(armedShortFlags[i] || armedShort),
+    armedLongBars,
+    armedShortBars,
+    longEntry: longEntry[i],
+    shortEntry: shortEntry[i],
+    longTp: longTp[i],
+    longSl: longSl[i],
+    shortTp: shortTp[i],
+    shortSl: shortSl[i],
+    midline: midline[i],
+    outerUpper: outerUpper[i],
+    innerUpper: innerUpper[i],
+    innerLower: innerLower[i],
+    outerLower: outerLower[i],
+    adx,
+    regimeNote,
+    params: {
+      kc_length: kcLength,
+      atr_mult_outer: atrMultOuter,
+      atr_mult_inner: atrMultInner,
+      setup_expiry: setupExpiry,
+    },
+    lastLongEntry: lastLongEntryIdx == null ? null : {
+      barsAgo: i - lastLongEntryIdx,
+      timeAgoText: formatAgo(i - lastLongEntryIdx, interval),
+    },
+    lastShortEntry: lastShortEntryIdx == null ? null : {
+      barsAgo: i - lastShortEntryIdx,
+      timeAgoText: formatAgo(i - lastShortEntryIdx, interval),
+    },
+    hint: hostile
+      ? `ADX 显示单边，Keltner 回归胜率差，即使有武装/信号也宜降权或跳过。${regimeNote}`
+      : phase === 'armed_long'
+        ? `已刺破外下轨武装，等回踩内下轨入多；中轨止盈、外下止损。${regimeNote}`
+        : phase === 'armed_short'
+          ? `已刺破外上轨武装，等回踩内上轨入空；中轨止盈、外上止损。${regimeNote}`
+          : phase === 'in_long'
+            ? `持有多：触及中轨止盈，跌破外下止损。${regimeNote}`
+            : phase === 'in_short'
+              ? `持有空：触及中轨止盈，升破外上止损。${regimeNote}`
+              : `双层 Keltner 回归（独立层，不进共振）。${regimeNote}`,
+  };
+}
+
 export function attachAlphaTrend(ema, klines, opts = {}) {
   if (!ema) return null;
   const at = evaluateAlphaTrend(klines, ema.coin, opts);
@@ -1217,6 +1631,8 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   ema.bb = evaluateBollinger(klines, ema.coin, opts);
   ema.bollMid = evaluateBollMidStrategy(klines, ema.coin, opts);
   ema.macdKdj = evaluateMacdKdjSignal(klines, ema.coin, opts);
+  ema.adx = evaluateAdx(klines, opts);
+  ema.keltner = evaluateDualKeltnerReversion(klines, ema.coin, { ...opts, adx: ema.adx });
   ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
   return ema;
 }

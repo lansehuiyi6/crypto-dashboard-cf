@@ -25,7 +25,7 @@ const CG_IDS = {
   XAU: 'pax-gold',
 };
 const CG = 'https://api.coingecko.com/api/v3';
-const KLINE_LIMIT = 120;
+const KLINE_LIMIT = 160;
 const SYMBOL_ALIASES = {
   XAUUSDT: ['XAUUSDT', 'PAXGUSDT'],
 };
@@ -51,7 +51,7 @@ export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT) 
           continue;
         }
         const data = await res.json();
-        if (Array.isArray(data) && data.length >= 80) return data;
+        if (Array.isArray(data) && data.length >= 100) return data;
         lastErr = new Error(`klines ${sym} short ${Array.isArray(data) ? data.length : 0}`);
       } catch (e) {
         lastErr = e;

@@ -46,7 +46,7 @@
             <span class="ema-notify-status" id="emaNotifyStatus"></span>
           </div>
         </div>
-        <p class="ema-board-lead">合成信号看开仓；穿越只是标记。MACD+KDJ 独立进出，4h 过滤顺势/逆势，1d 只看环境。开启浏览器通知后，共振/中轴/MK 进出边沿变化会提醒（需保持页面开启）。</p>
+        <p class="ema-board-lead">合成信号看开仓；穿越只是标记。MACD+KDJ / Keltner 为独立层（不进共振）。ADX 判单边：单边时回归策略降权。开启通知后，共振/中轴/MK/Keltner 变化会提醒（需保持页面开启）。</p>
         <details class="ema-board-help">
           <summary>策略说明</summary>
           <div class="ema-board-desc">
@@ -54,6 +54,7 @@
             <p><strong>AlphaTrend</strong>当方向开关。<strong>共振开仓</strong> = AT ∩（EMA 过滤 或 中轴）；开口顺势、闭口暂缓。</p>
             <p><strong>布林(20,2)</strong>看波动环境；<strong>中轴</strong>：中轨 + EMA6/12 + 放量，止损 1.5%。</p>
             <p><strong>MACD+KDJ</strong>：柱&gt;0 且 DIF&gt;DEA 入场；K/D/J 全&gt;80 离场（≠反手做空）。</p>
+            <p><strong>Keltner 回归</strong>：外轨刺破武装 → 内轨回踩入场 → 中轨止盈 / 外轨止损。<strong>ADX≥25 单边慎用</strong>（回归易逆势挨打），ADX&lt;20 震荡更友好。不进共振。</p>
           </div>
         </details>
       </div>
