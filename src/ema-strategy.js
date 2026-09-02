@@ -86,15 +86,17 @@ function enrichBoardKeltnerAdx(board) {
         bgAdx: adx4h,
         bgTf: '4h',
         localAdx: row15.adx,
+        localTf: '15m',
       });
     }
     if (row1h && row1h.keltner) {
       row1h.keltner = annotateKeltnerWithHtfAdx(row1h.keltner, {
         filterAdx: adx4h || adx1h,
         filterTf: adx4h ? '4h' : '1h',
-        bgAdx: adx4h ? adx1h : null,
-        bgTf: adx4h ? '1h' : null,
+        bgAdx: null,
+        bgTf: null,
         localAdx: row1h.adx,
+        localTf: '1h',
       });
     }
   }

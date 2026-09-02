@@ -263,10 +263,11 @@ function snapshotEmaAlerts(board) {
         tf,
         dir: kc.dir || 'watch',
         label: kc.stateLabel || 'Keltner观望',
-        reason: kc.hint || kc.regimeNote || '',
-        active: !!(kc.longEntry || kc.shortEntry || kc.longTp || kc.longSl || kc.shortTp || kc.shortSl
-          || kc.phase === 'armed_long' || kc.phase === 'armed_short'
-          || kc.phase === 'in_long' || kc.phase === 'in_short'),
+        reason: kc.advice || kc.hint || kc.regimeNote || '',
+        // 通知聚焦事件边沿：武装/入场/止盈/止损；「入场后未平」不刷通知
+        active: !!(kc.armLongEdge || kc.armShortEdge
+          || kc.longEntry || kc.shortEntry
+          || kc.longTp || kc.longSl || kc.shortTp || kc.shortSl),
         edge: kc.edge || '',
       };
     }
@@ -301,15 +302,17 @@ function shouldEmitAlert(prev, next) {
     || prev.edge !== next.edge
     || !prev.active;
   if (!changed) return null;
-  const edgeTxt = next.edge === 'entry'
-    ? '入场'
-    : next.edge === 'exit'
-      ? '离场'
-      : next.edge === 'tp'
-        ? '止盈'
-        : next.edge === 'sl'
-          ? '止损'
-          : '';
+  const edgeTxt = next.edge === 'arm'
+    ? '武装'
+    : next.edge === 'entry'
+      ? '入场'
+      : next.edge === 'exit'
+        ? '离场'
+        : next.edge === 'tp'
+          ? '止盈'
+          : next.edge === 'sl'
+            ? '止损'
+            : '';
   return {
     title: `${next.coin} ${next.tf} · ${notifyKindTitle(next.kind)}${edgeTxt ? ' ' + edgeTxt : ''}`,
     body: `${next.label}${next.reason ? ' — ' + next.reason : ''}`,
@@ -523,16 +526,18 @@ function enrichBoardKeltnerAdx(board) {
         bgAdx: adx4h,
         bgTf: '4h',
         localAdx: row15.adx,
+        localTf: '15m',
       });
     }
     if (row1h && row1h.keltner) {
-      // 1h 执行：过滤看 4h；本周期 1h ADX 作对照
+      // 1h 执行：过滤看 4h；本周期 1h ADX 作对照（不再把 1h 再当背景重复显示）
       row1h.keltner = annotateKeltnerWithHtfAdx(row1h.keltner, {
         filterAdx: adx4h || adx1h,
         filterTf: adx4h ? '4h' : '1h',
-        bgAdx: adx4h ? adx1h : null,
-        bgTf: adx4h ? '1h' : null,
+        bgAdx: null,
+        bgTf: null,
         localAdx: row1h.adx,
+        localTf: '1h',
       });
     }
   }
@@ -824,11 +829,48 @@ function keltnerTagClass(kc) {
   return 'watch';
 }
 
+function keltnerAdviceClass(dir) {
+  if (dir === 'long') return 'long';
+  if (dir === 'short') return 'short';
+  if (dir === 'hold') return 'long';
+  if (dir === 'exit' || dir === 'reduce' || dir === 'skip') return 'watch';
+  return 'watch';
+}
+
+function keltnerSignalChips(kc) {
+  if (!kc || !kc.ready) return '';
+  const chips = [];
+  if (kc.armLongEdge) chips.push('<span class="strategy-tag long">武装多</span>');
+  if (kc.armShortEdge) chips.push('<span class="strategy-tag short">武装空</span>');
+  if (kc.longEntry) chips.push('<span class="strategy-tag long">多入场</span>');
+  if (kc.shortEntry) chips.push('<span class="strategy-tag short">空入场</span>');
+  if (kc.longTp) chips.push('<span class="strategy-tag long">多止盈</span>');
+  if (kc.shortTp) chips.push('<span class="strategy-tag short">空止盈</span>');
+  if (kc.longSl) chips.push('<span class="strategy-tag watch">多止损</span>');
+  if (kc.shortSl) chips.push('<span class="strategy-tag watch">空止损</span>');
+  if (!chips.length && kc.signalKind === 'armed' && kc.armedLong) {
+    chips.push('<span class="strategy-tag long">武装多·等入场</span>');
+  }
+  if (!chips.length && kc.signalKind === 'armed' && kc.armedShort) {
+    chips.push('<span class="strategy-tag short">武装空·等入场</span>');
+  }
+  if (!chips.length && kc.signalKind === 'active' && kc.phase === 'in_long') {
+    const ago = kc.lastLongEntry?.timeAgoText ? ` · ${kc.lastLongEntry.timeAgoText}` : '';
+    chips.push(`<span class="strategy-tag long">多入场后未平${ago}</span>`);
+  }
+  if (!chips.length && kc.signalKind === 'active' && kc.phase === 'in_short') {
+    const ago = kc.lastShortEntry?.timeAgoText ? ` · ${kc.lastShortEntry.timeAgoText}` : '';
+    chips.push(`<span class="strategy-tag short">空入场后未平${ago}</span>`);
+  }
+  if (!chips.length) chips.push('<span class="strategy-tag watch">无事件</span>');
+  return `<div class="kc-signals">${chips.join('')}</div>`;
+}
+
 function keltnerHtml(kc) {
   if (!kc || !kc.ready) return '<span class="strategy-tag watch">--</span>';
   const cls = keltnerTagClass(kc);
   const filter = kc.filterAdx && kc.filterTf
-    ? `${kc.filterTf} ADX${kc.filterAdx.adx.toFixed(0)} ${kc.filterAdx.regimeLabel}`
+    ? `过滤 ${kc.filterTf} ADX${kc.filterAdx.adx.toFixed(0)} ${kc.filterAdx.regimeLabel}`
     : (kc.adx && Number.isFinite(kc.adx.adx)
       ? `ADX${kc.adx.adx.toFixed(0)} ${kc.adx.regimeLabel}`
       : 'ADX--');
@@ -836,12 +878,15 @@ function keltnerHtml(kc) {
     ? ` · 本周期 ${kc.localAdx.adx.toFixed(0)} ${kc.localAdx.regimeLabel}`
     : '';
   const bg = kc.bgAdx && kc.bgTf
-    ? ` · ${kc.bgTf} ${kc.bgAdx.adx.toFixed(0)} ${kc.bgAdx.regimeLabel}`
+    ? ` · 背景 ${kc.bgTf} ADX${kc.bgAdx.adx.toFixed(0)} ${kc.bgAdx.regimeLabel}`
     : '';
   const mid = Number.isFinite(kc.midline) ? fmtBand(kc.midline) : '--';
   const ou = Number.isFinite(kc.outerUpper) ? fmtBand(kc.outerUpper) : '--';
   const ol = Number.isFinite(kc.outerLower) ? fmtBand(kc.outerLower) : '--';
-  return `<span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span><span class="ema-meta">${filter}${local}${bg} · 中 ${mid} · 外 ${ol}/${ou}</span>`;
+  const advice = kc.advice
+    ? `<div class="ema-hint kc-advice"><span class="strategy-tag ${keltnerAdviceClass(kc.adviceDir)}">建议</span> ${kc.advice}</div>`
+    : '';
+  return `${keltnerSignalChips(kc)}<span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span><span class="ema-meta">${filter}${local}${bg} · 中 ${mid} · 外 ${ol}/${ou}</span>${advice}`;
 }
 
 function macdKdjBgHtml(board, coin) {
@@ -1351,7 +1396,20 @@ function clientEssayHtml(tfLabel, ema, s1, r1) {
     parts.push(scBlock('MK', `${mkLabel}${mk.reason ? '。' + mk.reason : ''}`));
   }
   if (kc && kc.ready) {
-    parts.push(scBlock('KC', `${kc.stateLabel}。${kc.regimeNote || kc.hint || ''}`));
+    const sig = kc.signalKind === 'arm' || kc.armLongEdge || kc.armShortEdge
+      ? '当前事件：武装'
+      : kc.signalKind === 'entry' || kc.longEntry || kc.shortEntry
+        ? '当前事件：入场'
+        : kc.signalKind === 'tp'
+          ? '当前事件：止盈'
+          : kc.signalKind === 'sl'
+            ? '当前事件：止损'
+            : kc.signalKind === 'active'
+              ? '当前：入场后未平（非账户持仓）'
+              : kc.signalKind === 'armed'
+                ? '当前：武装中·等入场'
+                : '当前：无事件';
+    parts.push(scBlock('KC', `<div>${sig} · ${kc.stateLabel}</div><div>${kc.advice || ''}</div><div class="sc-block-meta">${kc.regimeNote || ''}</div>`));
   }
   if (comb) {
     parts.push(scBlock('合成', `<span class="strategy-tag ${comb.dir === 'long' ? 'long' : comb.dir === 'short' ? 'short' : 'watch'}">${comb.label}</span> ${comb.reason || ''}`));

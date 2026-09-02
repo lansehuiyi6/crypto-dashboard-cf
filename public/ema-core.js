@@ -1386,6 +1386,8 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
   const shortSl = new Array(n).fill(false);
   const armedLongFlags = new Array(n).fill(false);
   const armedShortFlags = new Array(n).fill(false);
+  const armLongEdge = new Array(n).fill(false);
+  const armShortEdge = new Array(n).fill(false);
 
   let state = 0;
   let armedLong = false;
@@ -1448,12 +1450,14 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
       armedLongBars = 0;
       armedShort = false;
       armedShortBars = 0;
+      armLongEdge[i] = true;
     }
     if (crossAboveOuterUpper) {
       armedShort = true;
       armedShortBars = 0;
       armedLong = false;
       armedLongBars = 0;
+      armShortEdge[i] = true;
     }
 
     if (armedLong) {
@@ -1499,48 +1503,64 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
   const hostile = !!(adx && adx.hostileToReversion);
   const friendly = !!(adx && adx.friendlyToReversion);
 
+  // 信号页语义：强调武装/入场/止盈止损事件；「行程中」= 入场后尚未 TP/SL，不是账户持仓
   let phase = 'idle';
   let stateLabel = '观望';
+  let signalKind = 'idle';
   let dir = 'watch';
   if (longEntry[i]) {
     phase = 'long_entry';
-    stateLabel = '多入场';
+    stateLabel = '多入场信号';
+    signalKind = 'entry';
     dir = 'long';
   } else if (shortEntry[i]) {
     phase = 'short_entry';
-    stateLabel = '空入场';
+    stateLabel = '空入场信号';
+    signalKind = 'entry';
     dir = 'short';
   } else if (longTp[i]) {
     phase = 'long_tp';
-    stateLabel = '多止盈';
+    stateLabel = '多止盈信号';
+    signalKind = 'tp';
     dir = 'long';
   } else if (longSl[i]) {
     phase = 'long_sl';
-    stateLabel = '多止损';
+    stateLabel = '多止损信号';
+    signalKind = 'sl';
     dir = 'short';
   } else if (shortTp[i]) {
     phase = 'short_tp';
-    stateLabel = '空止盈';
+    stateLabel = '空止盈信号';
+    signalKind = 'tp';
     dir = 'short';
   } else if (shortSl[i]) {
     phase = 'short_sl';
-    stateLabel = '空止损';
+    stateLabel = '空止损信号';
+    signalKind = 'sl';
     dir = 'long';
   } else if (state === 1) {
     phase = 'in_long';
-    stateLabel = '持有多';
+    stateLabel = '多入场后·等止盈';
+    signalKind = 'active';
     dir = 'long';
   } else if (state === -1) {
     phase = 'in_short';
-    stateLabel = '持有空';
+    stateLabel = '空入场后·等止盈';
+    signalKind = 'active';
     dir = 'short';
   } else if (armedLongFlags[i] || armedLong) {
     phase = 'armed_long';
-    stateLabel = `武装多·剩${Math.max(setupExpiry - armedLongBars, 0)}根`;
+    stateLabel = armLongEdge[i]
+      ? `武装多信号·剩${Math.max(setupExpiry - armedLongBars, 0)}根`
+      : `武装多·等入场·剩${Math.max(setupExpiry - armedLongBars, 0)}根`;
+    signalKind = armLongEdge[i] ? 'arm' : 'armed';
     dir = 'long';
   } else if (armedShortFlags[i] || armedShort) {
     phase = 'armed_short';
-    stateLabel = `武装空·剩${Math.max(setupExpiry - armedShortBars, 0)}根`;
+    stateLabel = armShortEdge[i]
+      ? `武装空信号·剩${Math.max(setupExpiry - armedShortBars, 0)}根`
+      : `武装空·等入场·剩${Math.max(setupExpiry - armedShortBars, 0)}根`;
+    signalKind = armShortEdge[i] ? 'arm' : 'armed';
     dir = 'short';
   }
 
@@ -1560,13 +1580,23 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
 
   const lastLongEntryIdx = findLastTrue(longEntry, i);
   const lastShortEntryIdx = findLastTrue(shortEntry, i);
-  const edge = longEntry[i] || shortEntry[i]
-    ? 'entry'
-    : longTp[i] || shortTp[i]
-      ? 'tp'
-      : longSl[i] || shortSl[i]
-        ? 'sl'
-        : '';
+  const lastArmLongIdx = findLastTrue(armLongEdge, i);
+  const lastArmShortIdx = findLastTrue(armShortEdge, i);
+  const lastLongTpIdx = findLastTrue(longTp, i);
+  const lastLongSlIdx = findLastTrue(longSl, i);
+  const lastShortTpIdx = findLastTrue(shortTp, i);
+  const lastShortSlIdx = findLastTrue(shortSl, i);
+
+  let edge = '';
+  if (armLongEdge[i] || armShortEdge[i]) edge = 'arm';
+  else if (longEntry[i] || shortEntry[i]) edge = 'entry';
+  else if (longTp[i] || shortTp[i]) edge = 'tp';
+  else if (longSl[i] || shortSl[i]) edge = 'sl';
+
+  const mkEvent = (idx) => (idx == null ? null : {
+    barsAgo: i - idx,
+    timeAgoText: formatAgo(i - idx, interval),
+  });
 
   return {
     coin,
@@ -1575,12 +1605,15 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
     ready: true,
     phase,
     stateLabel,
+    signalKind,
     dir,
     confidence,
     edge,
     position: state,
     armedLong: !!(armedLongFlags[i] || armedLong),
     armedShort: !!(armedShortFlags[i] || armedShort),
+    armLongEdge: armLongEdge[i],
+    armShortEdge: armShortEdge[i],
     armedLongBars,
     armedShortBars,
     longEntry: longEntry[i],
@@ -1602,32 +1635,110 @@ export function evaluateDualKeltnerReversion(klines, coin = '', opts = {}) {
       atr_mult_inner: atrMultInner,
       setup_expiry: setupExpiry,
     },
-    lastLongEntry: lastLongEntryIdx == null ? null : {
-      barsAgo: i - lastLongEntryIdx,
-      timeAgoText: formatAgo(i - lastLongEntryIdx, interval),
-    },
-    lastShortEntry: lastShortEntryIdx == null ? null : {
-      barsAgo: i - lastShortEntryIdx,
-      timeAgoText: formatAgo(i - lastShortEntryIdx, interval),
-    },
-    hint: hostile
-      ? `ADX 显示单边，Keltner 回归胜率差，即使有武装/信号也宜降权或跳过。${regimeNote}`
-      : phase === 'armed_long'
-        ? `已刺破外下轨武装，等回踩内下轨入多；中轨止盈、外下止损。${regimeNote}`
-        : phase === 'armed_short'
-          ? `已刺破外上轨武装，等回踩内上轨入空；中轨止盈、外上止损。${regimeNote}`
-          : phase === 'in_long'
-            ? `持有多：触及中轨止盈，跌破外下止损。${regimeNote}`
-            : phase === 'in_short'
-              ? `持有空：触及中轨止盈，升破外上止损。${regimeNote}`
-              : `双层 Keltner 回归（独立层，不进共振）。${regimeNote}`,
+    lastArmLong: mkEvent(lastArmLongIdx),
+    lastArmShort: mkEvent(lastArmShortIdx),
+    lastLongEntry: mkEvent(lastLongEntryIdx),
+    lastShortEntry: mkEvent(lastShortEntryIdx),
+    lastLongTp: mkEvent(lastLongTpIdx),
+    lastLongSl: mkEvent(lastLongSlIdx),
+    lastShortTp: mkEvent(lastShortTpIdx),
+    lastShortSl: mkEvent(lastShortSlIdx),
+    hint: '', // annotate 时用 advice 覆盖
   };
+}
+
+function buildKeltnerAdvice(kc, confidence, hostile, friendly) {
+  const phase = kc.phase || 'idle';
+  const mid = Number.isFinite(kc.midline) ? kc.midline : null;
+  const ou = Number.isFinite(kc.outerUpper) ? kc.outerUpper : null;
+  const ol = Number.isFinite(kc.outerLower) ? kc.outerLower : null;
+  const iu = Number.isFinite(kc.innerUpper) ? kc.innerUpper : null;
+  const il = Number.isFinite(kc.innerLower) ? kc.innerLower : null;
+  const fmt = (v) => (v == null ? '--' : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-US') : v.toFixed(2)));
+  const entryAgo = kc.lastLongEntry?.timeAgoText || kc.lastShortEntry?.timeAgoText || '';
+
+  // 信号页：推荐的是「事件信号」，不是账户持仓状态
+  if (phase === 'idle') {
+    return {
+      adviceDir: 'watch',
+      advice: '暂无 KC 信号。关注下一笔：外轨刺破→武装信号，再等内轨回踩→入场信号。',
+    };
+  }
+  if (phase === 'long_tp' || phase === 'short_tp') {
+    return {
+      adviceDir: 'exit',
+      advice: '止盈信号：中轨触及。若曾按入场信号开过仓，现在是了结信号；未开仓则忽略，勿追。',
+    };
+  }
+  if (phase === 'long_sl' || phase === 'short_sl') {
+    return {
+      adviceDir: 'exit',
+      advice: '止损信号：外轨再次击穿。若曾按入场信号开过仓，现在是离场信号；然后重新等武装。',
+    };
+  }
+  if (hostile || confidence === 'low') {
+    if (phase === 'armed_long' || phase === 'long_entry') {
+      return {
+        adviceDir: 'skip',
+        advice: `有多向武装/入场信号，但高周期偏单边：信号页建议忽略或仅极轻仓记录；止损参考外下 ${fmt(ol)}。`,
+      };
+    }
+    if (phase === 'armed_short' || phase === 'short_entry') {
+      return {
+        adviceDir: 'skip',
+        advice: `有空向武装/入场信号，但高周期偏单边：信号页建议忽略或仅极轻仓记录；止损参考外上 ${fmt(ou)}。`,
+      };
+    }
+    if (phase === 'in_long' || phase === 'in_short') {
+      return {
+        adviceDir: 'reduce',
+        advice: `入场信号仍有效（尚未 TP/SL），但环境转差：未开仓不要追；若已按信号开过，优先减仓/收紧。`,
+      };
+    }
+  }
+  if (phase === 'armed_long') {
+    return {
+      adviceDir: 'long',
+      advice: `武装多信号有效：还不是入场。等价格回踩触及内下 ${fmt(il)} 才会出「多入场信号」。预案：入场后止盈中轨 ${fmt(mid)}，止损外下 ${fmt(ol)}。`,
+    };
+  }
+  if (phase === 'armed_short') {
+    return {
+      adviceDir: 'short',
+      advice: `武装空信号有效：还不是入场。等价格回抽触及内上 ${fmt(iu)} 才会出「空入场信号」。预案：入场后止盈中轨 ${fmt(mid)}，止损外上 ${fmt(ou)}。`,
+    };
+  }
+  if (phase === 'long_entry') {
+    return {
+      adviceDir: 'long',
+      advice: `多入场信号（当前K）：可按信号轻仓开多。目标中轨 ${fmt(mid)}，止损外下 ${fmt(ol)}。`,
+    };
+  }
+  if (phase === 'short_entry') {
+    return {
+      adviceDir: 'short',
+      advice: `空入场信号（当前K）：可按信号轻仓开空。目标中轨 ${fmt(mid)}，止损外上 ${fmt(ou)}。`,
+    };
+  }
+  if (phase === 'in_long') {
+    return {
+      adviceDir: 'watch',
+      advice: `多入场信号已出现${entryAgo ? '（' + entryAgo + '）' : ''}，目前处于「入场后未平」区间（不是账户持仓）。未开仓勿追；已开仓则等中轨 ${fmt(mid)} 止盈 / 外下 ${fmt(ol)} 止损信号。`,
+    };
+  }
+  if (phase === 'in_short') {
+    return {
+      adviceDir: 'watch',
+      advice: `空入场信号已出现${entryAgo ? '（' + entryAgo + '）' : ''}，目前处于「入场后未平」区间（不是账户持仓）。未开仓勿追；已开仓则等中轨 ${fmt(mid)} 止盈 / 外上 ${fmt(ou)} 止损信号。`,
+    };
+  }
+  return { adviceDir: 'watch', advice: '观望，等待武装/入场/止盈/止损信号。' };
 }
 
 /**
  * 用更高周期 ADX 给 Keltner 定「单边/震荡」过滤。
  * 15m 执行 → 过滤看 1h，背景看 4h；
- * 1h 执行 → 过滤看 4h，本周期 1h ADX 作对照。
+ * 1h 执行 → 过滤看 4h，本周期 1h ADX 作对照（不再重复显示一遍 1h）。
  */
 export function annotateKeltnerWithHtfAdx(kc, opts = {}) {
   if (!kc || !kc.ready) return kc;
@@ -1644,8 +1755,8 @@ export function annotateKeltnerWithHtfAdx(kc, opts = {}) {
 
   let stateLabel = String(kc.stateLabel || '观望')
     .replace(/·单边慎用$/g, '')
-    .replace(/·震荡友好$/g, '');
-  // 去掉旧 regime 后缀后再重打
+    .replace(/·震荡友好$/g, '')
+    .replace(/·大周期单边$/g, '');
   let confidence = 'normal';
   const bits = [];
   if (primary && filterTf) {
@@ -1658,7 +1769,8 @@ export function annotateKeltnerWithHtfAdx(kc, opts = {}) {
   if (localAdx && filterTf && filterAdx) {
     bits.push(`本周期 ADX${localAdx.adx.toFixed(0)} ${localAdx.regimeLabel}`);
   }
-  if (bgAdx && bgTf) {
+  // 背景仅在与过滤/本周期不同时展示，避免 1h 行重复「本周期 + 1h」
+  if (bgAdx && bgTf && bgTf !== filterTf && !(localAdx && bgTf === (opts.localTf || ''))) {
     bits.push(`背景 ${bgTf} ADX${bgAdx.adx.toFixed(0)} ${bgAdx.regimeLabel}`);
   }
 
@@ -1677,17 +1789,8 @@ export function annotateKeltnerWithHtfAdx(kc, opts = {}) {
     regimeNote += '：过滤周期尚可，但更大周期偏单边，宜降权';
   }
 
-  const hintBase = hostile
-    ? `高周期 ADX 显示单边，Keltner 回归宜降权或跳过。`
-    : phase === 'armed_long'
-      ? `已刺破外下轨武装，等回踩内下轨入多；中轨止盈、外下止损。`
-      : phase === 'armed_short'
-        ? `已刺破外上轨武装，等回踩内上轨入空；中轨止盈、外上止损。`
-        : phase === 'in_long'
-          ? `持有多：触及中轨止盈，跌破外下止损。`
-          : phase === 'in_short'
-            ? `持有空：触及中轨止盈，升破外上止损。`
-            : `双层 Keltner 回归（独立层，不进共振）。`;
+  const { advice, adviceDir } = buildKeltnerAdvice(kc, confidence, hostile, friendly);
+  const hintBase = advice;
 
   return {
     ...kc,
@@ -1700,7 +1803,9 @@ export function annotateKeltnerWithHtfAdx(kc, opts = {}) {
     confidence,
     stateLabel,
     regimeNote,
-    hint: `${hintBase}${regimeNote}`,
+    advice,
+    adviceDir,
+    hint: `${hintBase}（${regimeNote}）`,
   };
 }
 
