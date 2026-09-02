@@ -35,15 +35,43 @@ export function resampleLast(points, bucketMs) {
   return [...buckets.entries()].sort((a, b) => a[0] - b[0]);
 }
 
+function forwardFillSeries(points) {
+  const sorted = [...(points || [])].sort((a, b) => a[0] - b[0]);
+  const out = [];
+  let last = null;
+  for (const [t, v] of sorted) {
+    if (Number.isFinite(v)) last = v;
+    if (last != null) out.push([t, last]);
+  }
+  return out;
+}
+
+/** 在时间轴上取 ≤t 的最近市值，减少 CG 采样不对齐导致的空窗 */
+function lookupAsOf(sortedPairs, t) {
+  if (!sortedPairs.length) return null;
+  let lo = 0;
+  let hi = sortedPairs.length - 1;
+  if (t < sortedPairs[0][0]) return null;
+  if (t >= sortedPairs[hi][0]) return sortedPairs[hi][1];
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const mt = sortedPairs[mid][0];
+    if (mt === t) return sortedPairs[mid][1];
+    if (mt < t) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return hi >= 0 ? sortedPairs[hi][1] : null;
+}
+
 export function toDominanceKlines(tetherMc, btcMc, ethMc, bucketMs, scaleTo) {
   const tR = resampleLast(tetherMc, bucketMs);
-  const bMap = Object.fromEntries(resampleLast(btcMc, bucketMs));
-  const eMap = Object.fromEntries(resampleLast(ethMc, bucketMs));
+  const bR = forwardFillSeries(resampleLast(btcMc, bucketMs));
+  const eR = forwardFillSeries(resampleLast(ethMc, bucketMs));
   const rows = [];
   for (const [t, usdt] of tR) {
-    const btc = bMap[t];
-    const eth = eMap[t];
-    if (!btc || !eth) continue;
+    const btc = lookupAsOf(bR, t);
+    const eth = lookupAsOf(eR, t);
+    if (!btc || !eth || !usdt) continue;
     const proxy = (100 * usdt) / (usdt + btc + eth);
     rows.push([t, proxy]);
   }
@@ -315,7 +343,7 @@ export function evaluateMacdKdjSignal(klines, coin = '', opts = {}) {
     stateLabel = '超买区';
   } else if (macdBull) {
     state = 'hold';
-    stateLabel = '持有区';
+    stateLabel = '多头动能区';
   }
 
   const lastBuyIdx = findLastTrue(buyEdge, i);
@@ -420,15 +448,15 @@ export function annotateMacdKdjContext(mk, htf4h, htf1d) {
   } else if (mk.buyZone) {
     action = 'hold';
     if (htfBull) {
-      actionLabel = '持有区·顺势';
+      actionLabel = '多头动能区·顺势';
       bias = 'with';
       reason = '本周期仍在 MACD 多头区，4h 同向';
     } else if (htfBear) {
-      actionLabel = '持有区·逆势';
+      actionLabel = '多头动能区·逆势';
       bias = 'against';
       reason = '本周期仍在 MACD 多头区，但 4h 非多头，留意离场';
     } else {
-      actionLabel = '持有区';
+      actionLabel = '多头动能区';
     }
   }
 
@@ -1820,6 +1848,9 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   // 先用本周期 ADX 算出状态机；看板 enrich 时再叠高周期过滤
   ema.keltner = evaluateDualKeltnerReversion(klines, ema.coin, { ...opts, adx: ema.adx });
   ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
+  // 迷你走势：最近收盘（用于卡片火花线，不删指标信息）
+  const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
+  ema.spark = closes.filter((v) => Number.isFinite(v)).slice(-48);
   return ema;
 }
 

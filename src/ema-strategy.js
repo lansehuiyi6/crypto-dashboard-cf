@@ -15,6 +15,7 @@ import {
   EXEC_INTERVALS,
   HTF_INTERVALS,
 } from '../public/ema-core.js';
+// attachAlphaTrend used for richer USDT.D rows
 
 export { STRATEGY_SYMBOLS, evaluateEmaTrendStrategy, evaluateMacdKdjSignal };
 
@@ -191,8 +192,69 @@ async function fetchCgChart(id, days) {
   return res.json();
 }
 
+const BTC_CIRCULATING = 19.85e6;
+const ETH_CIRCULATING = 120.7e6;
+
+async function fetchUsdtCircUsdLlama() {
+  const res = await fetch('https://stablecoins.llama.fi/stablecoincharts/all?stablecoin=1', { headers: FETCH_HEADERS });
+  if (!res.ok) throw new Error(`llama usdt ${res.status}`);
+  const arr = await res.json();
+  const last = Array.isArray(arr) ? arr[arr.length - 1] : null;
+  const v = Number(last?.totalCirculatingUSD?.peggedUSD ?? last?.totalCirculating?.peggedUSD);
+  if (!Number.isFinite(v) || v <= 0) throw new Error('llama usdt bad');
+  return v;
+}
+
+function dominanceFromBinance(btcKlines, ethKlines, usdtMc, scaleTo) {
+  const ethByT = new Map((ethKlines || []).map((k) => [Number(k[0]), Number(k[4])]));
+  const rows = [];
+  for (const k of btcKlines || []) {
+    const t = Number(k[0]);
+    const btcPx = Number(k[4]);
+    const ethPx = ethByT.get(t);
+    if (!Number.isFinite(btcPx) || !Number.isFinite(ethPx) || btcPx <= 0 || ethPx <= 0) continue;
+    const proxy = (100 * usdtMc) / (usdtMc + btcPx * BTC_CIRCULATING + ethPx * ETH_CIRCULATING);
+    rows.push([t, proxy, proxy, proxy, proxy, 0]);
+  }
+  if (!rows.length) return [];
+  if (Number.isFinite(scaleTo) && scaleTo > 0) {
+    const last = rows[rows.length - 1][4];
+    if (last > 0) {
+      const s = scaleTo / last;
+      return rows.map((r) => {
+        const c = r[4] * s;
+        return [r[0], c, c, c, c, 0];
+      });
+    }
+  }
+  return rows;
+}
+
 export async function fetchUsdtDStrategies(liveUsdtD = null) {
   const out = { '15m': null, '1h': null };
+
+  // 主路径：币安 K 线 + Llama USDT 流通（避开 CG 429）
+  try {
+    const usdtMc = await fetchUsdtCircUsdLlama();
+    const [btc1h, eth1h, btc15, eth15] = await Promise.all([
+      fetchKlines('BTCUSDT', '1h', 160),
+      fetchKlines('ETHUSDT', '1h', 160),
+      fetchKlines('BTCUSDT', '15m', 160),
+      fetchKlines('ETHUSDT', '15m', 160),
+    ]);
+    const k1h = dominanceFromBinance(btc1h, eth1h, usdtMc, liveUsdtD);
+    const k15 = dominanceFromBinance(btc15, eth15, usdtMc, liveUsdtD);
+    const row1h = evaluateEmaTrendStrategy(k1h, 'USDT.D', {
+      interval: '1h', valueKind: 'pct', inverse: true, approx: true,
+    });
+    const row15 = evaluateEmaTrendStrategy(k15, 'USDT.D', {
+      interval: '15m', valueKind: 'pct', inverse: true, approx: true,
+    });
+    out['1h'] = row1h ? attachAlphaTrend(row1h, k1h, { interval: '1h' }) : null;
+    out['15m'] = row15 ? attachAlphaTrend(row15, k15, { interval: '15m' }) : null;
+    if (out['1h'] || out['15m']) return out;
+  } catch { /* fall through to CG */ }
+
   try {
     const [t14, b14, e14] = await Promise.all([
       fetchCgChart('tether', 14),
@@ -200,28 +262,23 @@ export async function fetchUsdtDStrategies(liveUsdtD = null) {
       fetchCgChart('ethereum', 14),
     ]);
     const k1h = toDominanceKlines(t14.market_caps, b14.market_caps, e14.market_caps, INTERVAL_MS['1h'], liveUsdtD);
-    out['1h'] = evaluateEmaTrendStrategy(k1h, 'USDT.D', {
+    const row1h = evaluateEmaTrendStrategy(k1h, 'USDT.D', {
       interval: '1h',
       valueKind: 'pct',
       inverse: true,
       approx: true,
     });
-  } catch { /* keep null */ }
+    out['1h'] = row1h ? attachAlphaTrend(row1h, k1h, { interval: '1h' }) : null;
 
-  try {
-    const [t1, b1, e1] = await Promise.all([
-      fetchCgChart('tether', 1),
-      fetchCgChart('bitcoin', 1),
-      fetchCgChart('ethereum', 1),
-    ]);
-    const k15 = toDominanceKlines(t1.market_caps, b1.market_caps, e1.market_caps, INTERVAL_MS['15m'], liveUsdtD);
-    out['15m'] = evaluateEmaTrendStrategy(k15, 'USDT.D', {
+    const k15 = toDominanceKlines(t14.market_caps, b14.market_caps, e14.market_caps, INTERVAL_MS['15m'], liveUsdtD);
+    const row15 = evaluateEmaTrendStrategy(k15, 'USDT.D', {
       interval: '15m',
       valueKind: 'pct',
       inverse: true,
       approx: true,
     });
-  } catch { /* 15m optional */ }
+    out['15m'] = row15 ? attachAlphaTrend(row15, k15, { interval: '15m' }) : null;
+  } catch { /* keep null */ }
 
   return out;
 }

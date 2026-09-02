@@ -43,6 +43,9 @@
           <div class="ema-notify" id="emaNotify">
             <button type="button" class="ema-notify-btn" id="emaNotifyToggle">浏览器通知</button>
             <button type="button" class="ema-notify-btn ghost" id="emaNotifyTest" hidden>测试</button>
+            <label class="ema-notify-arm" id="emaNotifyArmWrap" hidden>
+              <input type="checkbox" id="emaNotifyArm"> 含武装
+            </label>
             <span class="ema-notify-status" id="emaNotifyStatus"></span>
           </div>
         </div>
@@ -70,7 +73,7 @@
         <div class="panel">
           <div class="panel-header">
             <h2>短线操作信号</h2>
-            <span class="panel-note">点位按现价估算 · 15m/1h 来自 EMA7/21/56</span>
+            <span class="panel-note">点位按现价估算 · 含合成/MK/KC 事件与完整分层明细</span>
           </div>
           <div class="panel-body panel-body-short">
             <div id="signalList" class="short-grid"></div>

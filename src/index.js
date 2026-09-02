@@ -1,7 +1,7 @@
 import { SignalStore, getStore } from './store.js';
 import { assembleMarketSignals } from './market-signals.js';
 import { fetchBinancePrices, fetchGlobalOverview, inverseHint } from './live-market.js';
-import { fetchStrategyBoard, normalizeBoard, boardHasRows, mergeBoards } from './ema-strategy.js';
+import { fetchStrategyBoard, fetchUsdtDStrategies, normalizeBoard, boardHasRows, mergeBoards } from './ema-strategy.js';
 
 export { SignalStore };
 
@@ -240,12 +240,20 @@ async function handleApi(request, env, ctx) {
     const snap = await readSnapshot(env);
     const cached = normalizeBoard(snap.strategies?.data);
     const usdtD = snap.global?.data?.usdtDominance;
+    let liveUsdt = null;
+    try {
+      liveUsdt = await fetchUsdtDStrategies(usdtD);
+    } catch (e) {
+      console.warn('[ema-strategy] usdtD failed', e.message);
+    }
     try {
       const live = await fetchStrategyBoard(usdtD, {
         includeUsdtD: false,
         intervals: ['15m', '1h', '4h', '1d'],
       });
+      if (liveUsdt) live.usdtD = liveUsdt;
       const merged = mergeBoards(live, cached);
+      if (liveUsdt && (liveUsdt['1h'] || liveUsdt['15m'])) merged.usdtD = liveUsdt;
       if (boardHasRows(merged)) {
         return json({
           ...merged,
@@ -256,15 +264,17 @@ async function handleApi(request, env, ctx) {
     } catch (e) {
       console.warn('[ema-strategy] live failed', e.message);
     }
-    if (boardHasRows(cached)) {
+    if (boardHasRows(cached) || (liveUsdt && (liveUsdt['1h'] || liveUsdt['15m']))) {
       return json({
         ...cached,
+        usdtD: liveUsdt || cached.usdtD,
         source: 'snapshot',
         fetchedAt: snap.strategies?.timestamp || Date.now(),
       });
     }
     return json({
       ...cached,
+      usdtD: liveUsdt || cached.usdtD,
       source: 'empty',
       fetchedAt: Date.now(),
       errors: cached.errors || ['币安 K 线暂不可用，等待扫描写入'],

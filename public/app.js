@@ -150,7 +150,17 @@ const NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
 const NOTIFY_SENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function defaultNotifyPref() {
-  return { enabled: false };
+  return {
+    enabled: false,
+    // 默认只推真正可执行/了结边沿；武装可选
+    kinds: {
+      combined: true,   // 共振开仓
+      mid: false,       // 中轴默认关，减少噪音
+      mk: true,         // MK 入场/离场边沿
+      keltner: true,    // KC 入场/止盈/止损（武装另控）
+      keltnerArm: false,
+    },
+  };
 }
 
 function readNotifyPref() {
@@ -213,7 +223,26 @@ function pruneNotifySent(sent) {
 function isActionCombined(label, dir) {
   if (dir !== 'long' && dir !== 'short') return false;
   const s = String(label || '');
-  return /共振|做多|做空|中轴/.test(s) && !/暂缓|分歧|等EMA|未过滤/.test(s);
+  // 只认明确开仓类标签，避免「做多」字样误触
+  return /(开口)?共振做多|(开口)?共振做空|中轴共振做多|中轴共振做空|震荡环境做多|震荡环境做空/.test(s)
+    || (/共振/.test(s) && /做多|做空/.test(s) && !/暂缓|分歧|等EMA|未过滤/.test(s));
+}
+
+function notifyKindsEnabled() {
+  const pref = readNotifyPref();
+  return { ...defaultNotifyPref().kinds, ...(pref.kinds || {}) };
+}
+
+function alertAllowedByPref(evKind, edge) {
+  const kinds = notifyKindsEnabled();
+  if (evKind === 'combined') return !!kinds.combined;
+  if (evKind === 'mid') return !!kinds.mid;
+  if (evKind === 'mk') return !!kinds.mk;
+  if (evKind === 'keltner') {
+    if (edge === 'arm') return !!kinds.keltnerArm;
+    return !!kinds.keltner;
+  }
+  return true;
 }
 
 function snapshotEmaAlerts(board) {
@@ -245,7 +274,8 @@ function snapshotEmaAlerts(board) {
             : 'watch',
         label: mk.actionLabel || mk.stateLabel || '观望',
         reason: mk.reason || '',
-        active: !!(mk.buyEdge || mk.sellEdge || mk.action === 'entry' || mk.action === 'exit' || mk.action === 'counter'),
+        // 只认真正边沿，避免「动能区」被当成持仓结束噪音
+        active: !!(mk.buyEdge || mk.sellEdge),
         edge: mk.buyEdge ? 'entry' : mk.sellEdge ? 'exit' : '',
       };
       out[`${coin}|${tf}|mid`] = {
@@ -286,21 +316,13 @@ function notifyKindTitle(kind) {
 function shouldEmitAlert(prev, next) {
   // 新 key（首屏增量加载）只建基线，不弹窗
   if (!prev || !next) return null;
-  if (!next.active) {
-    if (prev.active) {
-      return {
-        title: `${next.coin} ${next.tf} · ${notifyKindTitle(next.kind)}结束`,
-        body: `${prev.label} → ${next.label || '观望'}`,
-        tag: `${next.coin}-${next.tf}-${next.kind}-off`,
-        fingerprint: `${next.coin}|${next.tf}|${next.kind}|off|${prev.label}`,
-      };
-    }
-    return null;
-  }
-  const changed = prev.label !== next.label
+  // 不再推「结束」类噪音；只推 active 边沿出现/切换
+  if (!next.active) return null;
+  if (!alertAllowedByPref(next.kind, next.edge)) return null;
+  const changed = !prev.active
+    || prev.label !== next.label
     || prev.dir !== next.dir
-    || prev.edge !== next.edge
-    || !prev.active;
+    || prev.edge !== next.edge;
   if (!changed) return null;
   const edgeTxt = next.edge === 'arm'
     ? '武装'
@@ -312,7 +334,9 @@ function shouldEmitAlert(prev, next) {
           ? '止盈'
           : next.edge === 'sl'
             ? '止损'
-            : '';
+            : next.kind === 'combined'
+              ? '开仓'
+              : '';
   return {
     title: `${next.coin} ${next.tf} · ${notifyKindTitle(next.kind)}${edgeTxt ? ' ' + edgeTxt : ''}`,
     body: `${next.label}${next.reason ? ' — ' + next.reason : ''}`,
@@ -403,15 +427,22 @@ function updateNotifyUi() {
     return;
   }
 
+  const armWrap = document.getElementById('emaNotifyArmWrap');
+  const armChk = document.getElementById('emaNotifyArm');
+  const kinds = notifyKindsEnabled();
+  if (armChk) armChk.checked = !!kinds.keltnerArm;
+
   if (pref.enabled && perm === 'granted') {
     btn.classList.add('on');
     btn.textContent = '通知已开启';
     if (testBtn) testBtn.hidden = false;
-    status.textContent = '共振 / 中轴 / MK / Keltner 变化会提醒 · 需保持页面开启';
+    if (armWrap) armWrap.hidden = false;
+    status.textContent = `默认：共振开仓 / MK出入 / KC入场止盈止损${kinds.keltnerArm ? ' / 武装' : ''} · 需保持页面开启`;
   } else {
     btn.classList.remove('on');
     btn.textContent = '开启浏览器通知';
     if (testBtn) testBtn.hidden = true;
+    if (armWrap) armWrap.hidden = true;
     status.textContent = perm === 'default' ? '点击授权后，重要信号变化会弹窗提醒' : '已授权，点击开启提醒';
   }
 }
@@ -433,18 +464,27 @@ async function toggleEmaNotify() {
       updateNotifyUi();
       return;
     }
-    writeNotifyPref({ ...pref, enabled: true });
+    writeNotifyPref({ ...pref, enabled: true, kinds: { ...defaultNotifyPref().kinds, ...(pref.kinds || {}) } });
     if (lastEmaBoard) processEmaNotifications(lastEmaBoard, { bootstrap: true });
-    showBrowserNotification('短线策略通知已开启', '之后共振/中轴/MACD+KDJ 重要变化会提醒（页面需保持打开）', 'ema-notify-on');
+    showBrowserNotification('短线策略通知已开启', '默认提醒：共振开仓、MK 出入、KC 入场/止盈/止损（武装需另开）', 'ema-notify-on');
     updateNotifyUi();
     return;
   }
   const enabled = !pref.enabled;
-  writeNotifyPref({ ...pref, enabled });
+  writeNotifyPref({ ...pref, enabled, kinds: { ...defaultNotifyPref().kinds, ...(pref.kinds || {}) } });
   if (enabled) {
     if (lastEmaBoard) processEmaNotifications(lastEmaBoard, { bootstrap: true });
-    showBrowserNotification('短线策略通知已开启', '之后共振/中轴/MACD+KDJ 重要变化会提醒（页面需保持打开）', 'ema-notify-on');
+    showBrowserNotification('短线策略通知已开启', '默认提醒：共振开仓、MK 出入、KC 入场/止盈/止损（武装需另开）', 'ema-notify-on');
   }
+  updateNotifyUi();
+}
+
+function toggleNotifyArm() {
+  const pref = readNotifyPref();
+  const armChk = document.getElementById('emaNotifyArm');
+  const kinds = { ...defaultNotifyPref().kinds, ...(pref.kinds || {}) };
+  kinds.keltnerArm = !!(armChk && armChk.checked);
+  writeNotifyPref({ ...pref, kinds });
   updateNotifyUi();
 }
 
@@ -459,8 +499,10 @@ function testEmaNotify() {
 function initEmaNotifyUi() {
   const btn = document.getElementById('emaNotifyToggle');
   const testBtn = document.getElementById('emaNotifyTest');
+  const armChk = document.getElementById('emaNotifyArm');
   if (btn) btn.addEventListener('click', () => { toggleEmaNotify().catch(() => updateNotifyUi()); });
   if (testBtn) testBtn.addEventListener('click', testEmaNotify);
+  if (armChk) armChk.addEventListener('change', toggleNotifyArm);
   updateNotifyUi();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') updateNotifyUi();
@@ -581,12 +623,13 @@ function hydrateBoardFromCache(board) {
   return hits;
 }
 
-async function fetchKlinesClient(symbol, interval) {
+async function fetchKlinesClient(symbol, interval, limit = KLINE_LIMIT) {
   const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
+  const lim = Math.max(Number(limit) || KLINE_LIMIT, 100);
   const hosts = [
-    (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${interval}&limit=${KLINE_LIMIT}`,
-    (s) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${interval}&limit=${KLINE_LIMIT}`,
-    (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${interval}&limit=${KLINE_LIMIT}`,
+    (s) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${interval}&limit=${lim}`,
+    (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${interval}&limit=${lim}`,
+    (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${interval}&limit=${lim}`,
   ];
   for (const sym of aliases) {
     for (const make of hosts) {
@@ -594,20 +637,20 @@ async function fetchKlinesClient(symbol, interval) {
         const res = await fetch(make(sym));
         if (!res.ok) continue;
         const data = await res.json();
-        if (Array.isArray(data) && data.length >= 100) return data;
+        if (Array.isArray(data) && data.length >= 80) return data;
       } catch { /* next host */ }
     }
   }
   throw new Error('klines ' + symbol);
 }
 
-async function getKlinesCached(symbol, interval, force) {
+async function getKlinesCached(symbol, interval, force, limit = KLINE_LIMIT) {
   const key = LS_KLINE + symbol + ':' + interval;
   if (!force) {
     const hit = lsGet(key, klineFreshMs(interval));
     if (hit) return hit;
   }
-  const klines = await fetchKlinesClient(symbol, interval);
+  const klines = await fetchKlinesClient(symbol, interval, limit);
   lsSet(key, klines);
   return klines;
 }
@@ -619,14 +662,104 @@ async function fetchCgMcaps(id, days) {
   return data.market_caps || [];
 }
 
+const BTC_CIRCULATING = 19.85e6;
+const ETH_CIRCULATING = 120.7e6;
+
+async function fetchUsdtCircUsd() {
+  const res = await fetch('https://stablecoins.llama.fi/stablecoincharts/all?stablecoin=1');
+  if (!res.ok) throw new Error('llama usdt ' + res.status);
+  const arr = await res.json();
+  if (!Array.isArray(arr) || !arr.length) throw new Error('llama usdt empty');
+  const last = arr[arr.length - 1];
+  const v = Number(last?.totalCirculatingUSD?.peggedUSD ?? last?.totalCirculating?.peggedUSD);
+  if (!Number.isFinite(v) || v <= 0) throw new Error('llama usdt bad value');
+  return v;
+}
+
+/** 用币安 BTC/ETH K 线 + USDT 流通市值构造 USDT.D 代理序列（不依赖 CoinGecko） */
+function dominanceKlinesFromBinance(btcKlines, ethKlines, usdtMc, scaleTo) {
+  const ethByT = new Map((ethKlines || []).map((k) => [Number(k[0]), Number(k[4])]));
+  const rows = [];
+  for (const k of btcKlines || []) {
+    const t = Number(k[0]);
+    const btcPx = Number(k[4]);
+    const ethPx = ethByT.get(t);
+    if (!Number.isFinite(btcPx) || !Number.isFinite(ethPx) || btcPx <= 0 || ethPx <= 0) continue;
+    const btcMc = btcPx * BTC_CIRCULATING;
+    const ethMc = ethPx * ETH_CIRCULATING;
+    const proxy = (100 * usdtMc) / (usdtMc + btcMc + ethMc);
+    rows.push([t, proxy, proxy, proxy, proxy, 0]);
+  }
+  if (!rows.length) return [];
+  if (Number.isFinite(scaleTo) && scaleTo > 0) {
+    const last = rows[rows.length - 1][4];
+    if (last > 0) {
+      const s = scaleTo / last;
+      return rows.map((r) => {
+        const c = r[4] * s;
+        return [r[0], c, c, c, c, 0];
+      });
+    }
+  }
+  return rows;
+}
+
+function buildUsdtDRow(klines, interval) {
+  const row = evaluateEmaTrendStrategy(klines, 'USDT.D', {
+    interval, valueKind: 'pct', inverse: true, approx: true,
+  });
+  return row ? attachAlphaTrend(row, klines, { interval }) : null;
+}
+
+async function fetchUsdtDFromBinanceProxy(scaleTo) {
+  const usdtMc = await fetchUsdtCircUsd();
+  const [btc1h, eth1h, btc15, eth15] = await Promise.all([
+    fetchKlinesClient('BTCUSDT', '1h', 160),
+    fetchKlinesClient('ETHUSDT', '1h', 160),
+    fetchKlinesClient('BTCUSDT', '15m', 160),
+    fetchKlinesClient('ETHUSDT', '15m', 160),
+  ]);
+  const k1h = dominanceKlinesFromBinance(btc1h, eth1h, usdtMc, scaleTo);
+  const k15 = dominanceKlinesFromBinance(btc15, eth15, usdtMc, scaleTo);
+  return {
+    '1h': buildUsdtDRow(k1h, '1h'),
+    '15m': buildUsdtDRow(k15, '15m'),
+    meta: {
+      source: 'Binance BTC/ETH + Llama USDT 流通市值代理',
+      scaleTo: Number.isFinite(scaleTo) ? scaleTo : null,
+      bars1h: k1h.length,
+      bars15: k15.length,
+      usdtMc,
+    },
+    error: '',
+  };
+}
+
 async function fetchUsdtDInBrowser() {
-  const out = { '15m': null, '1h': null };
+  const out = { '15m': null, '1h': null, meta: {}, error: '' };
   let scaleTo = null;
   try {
-    const g = await fetch('https://api.coingecko.com/api/v3/global').then((r) => r.json());
-    scaleTo = Number(g?.data?.market_cap_percentage?.usdt);
-  } catch { /* optional scale */ }
+    const ov = await fetchJSON('/api/overview');
+    scaleTo = Number(ov?.usdtDominance);
+  } catch { /* ignore */ }
+  if (!Number.isFinite(scaleTo)) {
+    try {
+      const g = await fetch('https://api.coingecko.com/api/v3/global').then((r) => r.json());
+      scaleTo = Number(g?.data?.market_cap_percentage?.usdt);
+    } catch { /* optional scale */ }
+  }
+  if (Number.isFinite(scaleTo)) out.meta.scaleTo = scaleTo;
 
+  // 主路径：币安代理（稳定，不受 CG 429 影响）
+  try {
+    const proxied = await fetchUsdtDFromBinanceProxy(scaleTo);
+    if (proxied['1h'] || proxied['15m']) return proxied;
+    out.error = '币安代理序列不足以计算 EMA';
+  } catch (err) {
+    out.error = '币安/Llama 代理失败：' + (err.message || err);
+  }
+
+  // 次路径：CoinGecko 14 天市值（可能限流）
   try {
     const [t, b, e] = await Promise.all([
       fetchCgMcaps('tether', 14),
@@ -634,25 +767,15 @@ async function fetchUsdtDInBrowser() {
       fetchCgMcaps('ethereum', 14),
     ]);
     const k1h = toDominanceKlines(t, b, e, INTERVAL_MS['1h'], scaleTo);
-    out['1h'] = evaluateEmaTrendStrategy(k1h, 'USDT.D', {
-      interval: '1h', valueKind: 'pct', inverse: true, approx: true,
-    });
-  } catch (e) {
-    console.warn('USDT.D 1h failed', e.message);
-  }
-
-  try {
-    const [t, b, e] = await Promise.all([
-      fetchCgMcaps('tether', 1),
-      fetchCgMcaps('bitcoin', 1),
-      fetchCgMcaps('ethereum', 1),
-    ]);
     const k15 = toDominanceKlines(t, b, e, INTERVAL_MS['15m'], scaleTo);
-    out['15m'] = evaluateEmaTrendStrategy(k15, 'USDT.D', {
-      interval: '15m', valueKind: 'pct', inverse: true, approx: true,
-    });
-  } catch (e) {
-    console.warn('USDT.D 15m failed', e.message);
+    out['1h'] = buildUsdtDRow(k1h, '1h');
+    out['15m'] = buildUsdtDRow(k15, '15m');
+    out.meta.source = 'CoinGecko market_chart 14d';
+    out.meta.bars1h = k1h.length;
+    out.meta.bars15 = k15.length;
+    if (out['1h'] || out['15m']) out.error = '';
+  } catch (err) {
+    out.error = (out.error ? out.error + '；' : '') + 'CoinGecko：' + (err.message || err);
   }
   return out;
 }
@@ -875,18 +998,43 @@ function keltnerHtml(kc) {
       ? `ADX${kc.adx.adx.toFixed(0)} ${kc.adx.regimeLabel}`
       : 'ADX--');
   const local = kc.localAdx && kc.filterTf
-    ? ` · 本周期 ${kc.localAdx.adx.toFixed(0)} ${kc.localAdx.regimeLabel}`
+    ? `本周期 ${kc.localAdx.adx.toFixed(0)} ${kc.localAdx.regimeLabel}`
     : '';
   const bg = kc.bgAdx && kc.bgTf
-    ? ` · 背景 ${kc.bgTf} ADX${kc.bgAdx.adx.toFixed(0)} ${kc.bgAdx.regimeLabel}`
+    ? `背景 ${kc.bgTf} ADX${kc.bgAdx.adx.toFixed(0)} ${kc.bgAdx.regimeLabel}`
     : '';
   const mid = Number.isFinite(kc.midline) ? fmtBand(kc.midline) : '--';
   const ou = Number.isFinite(kc.outerUpper) ? fmtBand(kc.outerUpper) : '--';
   const ol = Number.isFinite(kc.outerLower) ? fmtBand(kc.outerLower) : '--';
+  const iu = Number.isFinite(kc.innerUpper) ? fmtBand(kc.innerUpper) : '--';
+  const il = Number.isFinite(kc.innerLower) ? fmtBand(kc.innerLower) : '--';
+  const adxTitle = [filter, local, bg].filter(Boolean).join(' · ');
+  // 信息保留：主行看事件+状态；ADX/轨道放次行（不删）
   const advice = kc.advice
     ? `<div class="ema-hint kc-advice"><span class="strategy-tag ${keltnerAdviceClass(kc.adviceDir)}">建议</span> ${kc.advice}</div>`
     : '';
-  return `${keltnerSignalChips(kc)}<span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span><span class="ema-meta">${filter}${local}${bg} · 中 ${mid} · 外 ${ol}/${ou}</span>${advice}`;
+  return `${keltnerSignalChips(kc)}
+    <div class="kc-main"><span class="strategy-tag ${cls}" title="${escAttr(kc.hint || '')}">${kc.stateLabel}</span></div>
+    <div class="ema-meta kc-meta" title="${escAttr(adxTitle)}">${filter}${local ? ' · ' + local : ''}${bg ? ' · ' + bg : ''}</div>
+    <div class="ema-meta kc-meta">中 ${mid} · 内 ${il}/${iu} · 外 ${ol}/${ou}</div>
+    ${advice}`;
+}
+
+function sparklineSvg(values, tone = 'up') {
+  const pts = (values || []).filter((v) => Number.isFinite(v));
+  if (pts.length < 2) return '';
+  const w = 72;
+  const h = 22;
+  const min = Math.min(...pts);
+  const max = Math.max(...pts);
+  const span = max - min || 1;
+  const path = pts.map((v, i) => {
+    const x = (i / (pts.length - 1)) * w;
+    const y = h - ((v - min) / span) * (h - 2) - 1;
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const stroke = tone === 'down' ? '#f85149' : '#3fb950';
+  return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><path d="${path}" fill="none" stroke="${stroke}" stroke-width="1.5" /></svg>`;
 }
 
 function macdKdjBgHtml(board, coin) {
@@ -949,7 +1097,7 @@ function renderEmaTfCol(tf, row) {
   const mkHint = mk && mk.reason ? `<div class="ema-hint">${mk.reason}</div>` : '';
   const bbHint = row.bb && row.bb.hint ? `<div class="ema-hint">${row.bb.hint}</div>` : '';
   const midHint = row.bollMid && row.bollMid.hint ? `<div class="ema-hint">${row.bollMid.hint}</div>` : '';
-  const kcHint = kc && kc.hint ? `<div class="ema-hint">${kc.hint}</div>` : '';
+  // KC 建议已在 keltnerHtml 内完整展示，避免再重复贴一遍 hint
   return `<div class="ema-tf-col dir-${dir}">
     <div class="ema-tf-head">
       <span class="ema-tf">${tf}</span>
@@ -966,7 +1114,7 @@ function renderEmaTfCol(tf, row) {
       ${emaMetric('MK', macdKdjHtml(mk))}
       ${emaMetric('KC', keltnerHtml(kc))}
     </div>
-    ${mkHint}${bbHint}${midHint}${kcHint}
+    ${mkHint}${bbHint}${midHint}
   </div>`;
 }
 
@@ -981,11 +1129,15 @@ function renderEmaCards(data) {
     const d15 = combinedDir(r15);
     const d1h = combinedDir(r1h);
     const accent = d15 === d1h && d15 !== 'watch' ? d15 : (d1h !== 'watch' ? d1h : d15);
+    const spark = sparklineSvg((r1h && r1h.spark) || (r15 && r15.spark), accent === 'short' ? 'down' : 'up');
     return `<article class="ema-coin-card accent-${accent}">
       <div class="ema-coin-head">
         <div class="ema-coin-id">
           <h3>${coin}</h3>
-          ${px ? `<div class="ema-coin-price">${px}</div>` : ''}
+          <div class="ema-coin-price-row">
+            ${px ? `<div class="ema-coin-price">${px}</div>` : ''}
+            ${spark}
+          </div>
         </div>
         <div class="ema-summary">
           <div class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(r15)}</div>
@@ -1001,32 +1153,82 @@ function renderEmaCards(data) {
   }).join('');
 }
 
-function paintEmaBoard(data) {
+let paintBoardTimer = null;
+let paintNotifyAfter = false;
+
+function paintEmaBoard(data, opts = {}) {
   if (data) enrichBoardMacdKdj(data);
   lastEmaBoard = data;
-  renderEmaCards(data);
-  renderShortSignalCards();
-  renderUsdtDBox(data && data.usdtD);
-  processEmaNotifications(data);
+  if (opts.notify) paintNotifyAfter = true;
+
+  const flush = () => {
+    paintBoardTimer = null;
+    const board = lastEmaBoard;
+    renderEmaCards(board);
+    renderShortSignalCards();
+    renderUsdtDBox(board && board.usdtD);
+    if (opts.immediateNotify || paintNotifyAfter) {
+      processEmaNotifications(board);
+      paintNotifyAfter = false;
+    }
+  };
+
+  if (opts.immediate) {
+    if (paintBoardTimer) {
+      clearTimeout(paintBoardTimer);
+      paintBoardTimer = null;
+    }
+    flush();
+    return;
+  }
+  if (paintBoardTimer) return;
+  paintBoardTimer = setTimeout(flush, 400);
 }
 
 function renderUsdtDBox(usdtD) {
   const el = document.getElementById('usdtDBox');
   if (!el) return;
   if (!usdtD || (!usdtD['1h'] && !usdtD['15m'])) {
-    el.innerHTML = '<h3>USDT.D EMA</h3><div class="usdt-d-note">暂无 K 线（CoinGecko 限流或数据不足）。USDT.D 与 BTC/ETH 多为反向。</div>';
+    el.innerHTML = `<h3>USDT.D EMA</h3>
+      <div class="usdt-d-note">暂无可用序列（CoinGecko 限流、采样过短或对齐失败）。已改为优先用 14 天市值序列重采样；可点刷新重试。USDT.D 与 BTC/ETH 多为反向。</div>`;
     return;
   }
-  const lines = ['15m', '1h'].map((tf) => {
+  const meta = usdtD.meta || {};
+  const cards = ['1h', '15m'].map((tf) => {
     const row = usdtD[tf];
-    if (!row) return `<div class="usdt-d-row">${tf}：暂无</div>`;
+    if (!row) {
+      return `<div class="usdt-d-card">
+        <div class="usdt-d-tf">${tf}</div>
+        <div class="usdt-d-empty">本周期暂无（通常是采样点 &lt; 80 根，稍后重试）</div>
+      </div>`;
+    }
     const ls = row.lastSignal;
-    return `<div class="usdt-d-row">${tf}：现价 ${row.priceText} · ${row.trendLabel} · 最近 ${ls ? ls.label + ' ' + ls.timeAgoText + '（' + ls.priceText + '）' : '尚无穿越'} · ${row.cryptoBiasLabel || emaFilterText(row)}</div>`;
+    const comb = row.combined;
+    const spark = sparklineSvg(row.spark, comb && comb.dir === 'short' ? 'down' : 'up');
+    return `<div class="usdt-d-card">
+      <div class="usdt-d-card-h">
+        <span class="usdt-d-tf">${tf}</span>
+        ${spark}
+        <span class="usdt-d-px">${row.priceText || '--'}</span>
+      </div>
+      <div class="usdt-d-line">${row.trendLabel || '--'} · ${ls ? ls.label + ' ' + (ls.timeAgoText || '') : '尚无穿越'}</div>
+      <div class="usdt-d-line">过滤 ${emaFilterText(row)}</div>
+      <div class="usdt-d-line">AT ${alphaHtml(row.alpha)} · 合成 ${combinedHtml(row)}</div>
+      <div class="usdt-d-line bias">${row.cryptoBiasLabel || '偏多/偏空待定（看穿越方向）'}</div>
+      ${comb && comb.reason ? `<div class="usdt-d-hint">${comb.reason}</div>` : ''}
+    </div>`;
   }).join('');
   el.innerHTML = `
-    <h3>USDT.D（稳定币市值占比）EMA7/21/56</h3>
-    ${lines}
-    <div class="usdt-d-note">币安没有 USDT.D 合约。这里用 Tether / (BTC+ETH+USDT) 市值比，再校准到当前 USDT.D。上穿 56 = 资金进稳定币，对 BTC/ETH 偏空；下穿相反。15m 数据较短，交叉可能不如 1h 稳定。</div>
+    <h3>USDT.D（稳定币市值占比）短线分析</h3>
+    <div class="usdt-d-grid">${cards}</div>
+    <div class="usdt-d-note">
+      币安无 USDT.D 合约：用 Tether/(BTC+ETH+USDT) 市值比代理${Number.isFinite(meta.scaleTo) ? `，并校准到全球占比 ${Number(meta.scaleTo).toFixed(2)}%` : ''}。
+      上穿 EMA56 ≈ 资金进稳定币（对风险资产偏空）；下穿相反。
+      ${meta.source ? `数据源：${meta.source}` : ''}
+      ${meta.bars1h != null ? `· 1h ${meta.bars1h} 根` : ''}
+      ${meta.bars15 != null ? `· 15m ${meta.bars15} 根` : ''}
+      ${usdtD.error ? `· 备注：${usdtD.error}` : ''}
+    </div>
   `;
 }
 
@@ -1063,16 +1265,35 @@ function setEmaNote(data) {
 async function loadUsdtD(board, force) {
   if (!force) {
     const hit = lsGet(LS_USDTD, USDTD_TTL_MS);
-    if (hit) {
+    if (hit && (hit['1h'] || hit['15m'])) {
       board.usdtD = hit;
       renderUsdtDBox(hit);
       return;
     }
   }
+
+  // 1) 优先 Worker（服务端拉 CG，不受浏览器 CORS/限流影响）
+  try {
+    const snap = await fetchJSON('/api/ema-strategy');
+    if (snap && snap.usdtD && (snap.usdtD['1h'] || snap.usdtD['15m'])) {
+      const data = {
+        ...snap.usdtD,
+        meta: { ...(snap.usdtD.meta || {}), source: snap.source ? `Worker(${snap.source})` : 'Worker' },
+      };
+      board.usdtD = data;
+      lsSet(LS_USDTD, data);
+      renderUsdtDBox(data);
+      return;
+    }
+  } catch (e) {
+    console.warn('USDT.D worker fallback miss', e.message || e);
+  }
+
+  // 2) 浏览器直连 CG（可能限流/失败）
   try {
     const data = await fetchUsdtDInBrowser();
     board.usdtD = data;
-    lsSet(LS_USDTD, data);
+    if (data && (data['1h'] || data['15m'])) lsSet(LS_USDTD, data);
     renderUsdtDBox(data);
   } catch (e) {
     board.errors.push('USDT.D: ' + (e.message || e));
@@ -1085,7 +1306,7 @@ async function loadEmaStrategy(force = false) {
   const board = emptyBoard();
   const cachedHits = hydrateBoardFromCache(board);
   if (cachedHits) {
-    paintEmaBoard(board);
+    paintEmaBoard(board, { immediate: true, notify: true });
     setEmaNote(board);
   }
 
@@ -1099,7 +1320,7 @@ async function loadEmaStrategy(force = false) {
           if (!row) board.errors.push(coin + ' ' + interval + ': 指标不足');
           board.cached = false;
           board.fetchedAt = Date.now();
-          paintEmaBoard(board);
+          paintEmaBoard(board); // 节流中间态，不每次推通知
         } catch (e) {
           if (!board[interval][coin]) {
             board[interval][coin] = null;
@@ -1111,7 +1332,8 @@ async function loadEmaStrategy(force = false) {
     const htfJobs = HTF_INTERVALS.flatMap((interval) =>
       Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
         try {
-          const klines = await getKlinesCached(symbol, interval, force);
+          // 4h/1d 用不那么长的序列即可
+          const klines = await getKlinesCached(symbol, interval, force, interval === '1d' ? 120 : 140);
           const mk = macdKdjFromKlines(klines, coin, interval);
           board[interval][coin] = mk;
           if (!mk) board.errors.push(coin + ' ' + interval + ': MACD+KDJ 不足');
@@ -1131,11 +1353,12 @@ async function loadEmaStrategy(force = false) {
       }),
     );
     await Promise.all([...execJobs, ...htfJobs]);
+    paintEmaBoard(board, { immediate: true, notify: true });
 
     if (!boardHasClientRows(board)) {
       try {
         const fallback = await fetchJSON('/api/ema-strategy');
-        paintEmaBoard(fallback);
+        paintEmaBoard(fallback, { immediate: true, notify: true });
         setEmaNote(fallback);
       } catch (e) {
         console.warn('browser klines fallback to worker', e.message);
@@ -1378,19 +1601,12 @@ function clientEssayHtml(tfLabel, ema, s1, r1) {
   const kc = ema.keltner;
   const comb = ema.combined;
 
-  const parts = [
-    scBlock('趋势', `${tfLabel}目前是${align}。${cross}`),
-    scBlock('过滤', `${macd}${rsi}`),
-  ];
-  if (at) {
-    parts.push(scBlock('AT', `AlphaTrend ${at.stateLabel}${at.lastEventLabel ? '，' + at.lastEventLabel : ''}。`));
+  // 信息完整保留；顺序改成先看结论/事件，细节在后，减少「读完才知道怎么做」
+  const parts = [];
+  if (comb) {
+    parts.push(scBlock('合成', `<span class="strategy-tag ${comb.dir === 'long' ? 'long' : comb.dir === 'short' ? 'short' : 'watch'}">${comb.label}</span> ${comb.reason || ''}`));
   }
-  if (bb) {
-    parts.push(scBlock('布林', `${bb.widthLabel}，价格${bb.zoneLabel}（%B ${Number.isFinite(bb.pctB) ? bb.pctB.toFixed(2) : '--'}）。${bb.hint || ''}`));
-  }
-  if (bm) {
-    parts.push(scBlock('中轴', bm.hint || bm.setupLabel || '--'));
-  }
+  parts.push(scBlock('操作', action));
   if (mk) {
     const mkLabel = mk.actionLabel || mk.stateLabel || '观望';
     parts.push(scBlock('MK', `${mkLabel}${mk.reason ? '。' + mk.reason : ''}`));
@@ -1411,10 +1627,17 @@ function clientEssayHtml(tfLabel, ema, s1, r1) {
                 : '当前：无事件';
     parts.push(scBlock('KC', `<div>${sig} · ${kc.stateLabel}</div><div>${kc.advice || ''}</div><div class="sc-block-meta">${kc.regimeNote || ''}</div>`));
   }
-  if (comb) {
-    parts.push(scBlock('合成', `<span class="strategy-tag ${comb.dir === 'long' ? 'long' : comb.dir === 'short' ? 'short' : 'watch'}">${comb.label}</span> ${comb.reason || ''}`));
+  parts.push(scBlock('趋势', `${tfLabel}目前是${align}。${cross}`));
+  parts.push(scBlock('过滤', `${macd}${rsi}`));
+  if (at) {
+    parts.push(scBlock('AT', `AlphaTrend ${at.stateLabel}${at.lastEventLabel ? '，' + at.lastEventLabel : ''}。`));
   }
-  parts.push(scBlock('操作', action));
+  if (bb) {
+    parts.push(scBlock('布林', `${bb.widthLabel}，价格${bb.zoneLabel}（%B ${Number.isFinite(bb.pctB) ? bb.pctB.toFixed(2) : '--'}）。${bb.hint || ''}`));
+  }
+  if (bm) {
+    parts.push(scBlock('中轴', bm.hint || bm.setupLabel || '--'));
+  }
   return parts.join('');
 }
 
