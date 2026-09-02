@@ -205,13 +205,32 @@ async function fetchUsdtCircUsdLlama() {
   return v;
 }
 
+function lookupPxAsOf(sortedPairs, t) {
+  if (!sortedPairs.length) return null;
+  let lo = 0;
+  let hi = sortedPairs.length - 1;
+  if (t < sortedPairs[0][0]) return null;
+  if (t >= sortedPairs[hi][0]) return sortedPairs[hi][1];
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const mt = sortedPairs[mid][0];
+    if (mt === t) return sortedPairs[mid][1];
+    if (mt < t) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return hi >= 0 ? sortedPairs[hi][1] : null;
+}
+
 function dominanceFromBinance(btcKlines, ethKlines, usdtMc, scaleTo) {
-  const ethByT = new Map((ethKlines || []).map((k) => [Number(k[0]), Number(k[4])]));
+  const ethSeries = (ethKlines || [])
+    .map((k) => [Number(k[0]), Number(k[4])])
+    .filter(([t, px]) => Number.isFinite(t) && Number.isFinite(px) && px > 0)
+    .sort((a, b) => a[0] - b[0]);
   const rows = [];
   for (const k of btcKlines || []) {
     const t = Number(k[0]);
     const btcPx = Number(k[4]);
-    const ethPx = ethByT.get(t);
+    const ethPx = lookupPxAsOf(ethSeries, t);
     if (!Number.isFinite(btcPx) || !Number.isFinite(ethPx) || btcPx <= 0 || ethPx <= 0) continue;
     const proxy = (100 * usdtMc) / (usdtMc + btcPx * BTC_CIRCULATING + ethPx * ETH_CIRCULATING);
     rows.push([t, proxy, proxy, proxy, proxy, 0]);

@@ -120,8 +120,8 @@ async function fetchBinancePricesClient() {
 }
 
 const LS_KLINE = 'cd:kl:';
-const LS_USDTD = 'cd:usdtd';
-const USDTD_TTL_MS = 15 * 60 * 1000;
+const LS_USDTD = 'cd:usdtd:v3';
+const USDTD_TTL_MS = 30 * 60 * 1000;
 const KLINE_STALE_MAX_MS = 30 * 60 * 1000;
 
 function lsGet(key, maxAgeMs) {
@@ -665,6 +665,22 @@ async function fetchCgMcaps(id, days) {
 const BTC_CIRCULATING = 19.85e6;
 const ETH_CIRCULATING = 120.7e6;
 
+function lookupPriceAsOf(sortedPairs, t) {
+  if (!sortedPairs.length) return null;
+  let lo = 0;
+  let hi = sortedPairs.length - 1;
+  if (t < sortedPairs[0][0]) return null;
+  if (t >= sortedPairs[hi][0]) return sortedPairs[hi][1];
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const mt = sortedPairs[mid][0];
+    if (mt === t) return sortedPairs[mid][1];
+    if (mt < t) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return hi >= 0 ? sortedPairs[hi][1] : null;
+}
+
 async function fetchUsdtCircUsd() {
   const res = await fetch('https://stablecoins.llama.fi/stablecoincharts/all?stablecoin=1');
   if (!res.ok) throw new Error('llama usdt ' + res.status);
@@ -678,12 +694,16 @@ async function fetchUsdtCircUsd() {
 
 /** 用币安 BTC/ETH K 线 + USDT 流通市值构造 USDT.D 代理序列（不依赖 CoinGecko） */
 function dominanceKlinesFromBinance(btcKlines, ethKlines, usdtMc, scaleTo) {
-  const ethByT = new Map((ethKlines || []).map((k) => [Number(k[0]), Number(k[4])]));
+  // ETH 用 as-of 对齐，避免 15m 开盘时间偶发错位导致整列被跳过
+  const ethSeries = (ethKlines || [])
+    .map((k) => [Number(k[0]), Number(k[4])])
+    .filter(([t, px]) => Number.isFinite(t) && Number.isFinite(px) && px > 0)
+    .sort((a, b) => a[0] - b[0]);
   const rows = [];
   for (const k of btcKlines || []) {
     const t = Number(k[0]);
     const btcPx = Number(k[4]);
-    const ethPx = ethByT.get(t);
+    const ethPx = lookupPriceAsOf(ethSeries, t);
     if (!Number.isFinite(btcPx) || !Number.isFinite(ethPx) || btcPx <= 0 || ethPx <= 0) continue;
     const btcMc = btcPx * BTC_CIRCULATING;
     const ethMc = ethPx * ETH_CIRCULATING;
@@ -1155,6 +1175,7 @@ function renderEmaCards(data) {
 
 let paintBoardTimer = null;
 let paintNotifyAfter = false;
+let lastUsdtDView = null;
 
 function paintEmaBoard(data, opts = {}) {
   if (data) enrichBoardMacdKdj(data);
@@ -1166,7 +1187,11 @@ function paintEmaBoard(data, opts = {}) {
     const board = lastEmaBoard;
     renderEmaCards(board);
     renderShortSignalCards();
-    renderUsdtDBox(board && board.usdtD);
+    // 策略板刷新时不要用空 usdtD 把上方分析刷掉
+    const usdt = board && board.usdtD && (board.usdtD['1h'] || board.usdtD['15m'])
+      ? board.usdtD
+      : lastUsdtDView;
+    if (usdt) renderUsdtDBox(usdt);
     if (opts.immediateNotify || paintNotifyAfter) {
       processEmaNotifications(board);
       paintNotifyAfter = false;
@@ -1189,22 +1214,24 @@ function renderUsdtDBox(usdtD) {
   const el = document.getElementById('usdtDBox');
   if (!el) return;
   if (!usdtD || (!usdtD['1h'] && !usdtD['15m'])) {
-    el.innerHTML = `<h3>USDT.D EMA</h3>
-      <div class="usdt-d-note">暂无可用序列（CoinGecko 限流、采样过短或对齐失败）。已改为优先用 14 天市值序列重采样；可点刷新重试。USDT.D 与 BTC/ETH 多为反向。</div>`;
+    el.innerHTML = `<h3>USDT.D（稳定币市值占比）短线分析</h3>
+      <div class="usdt-d-note">暂无可用序列。正在用币安 BTC/ETH + Llama USDT 流通重建；可点刷新重试。USDT.D 与 BTC/ETH 多为反向。</div>`;
     return;
   }
+  lastUsdtDView = usdtD;
   const meta = usdtD.meta || {};
   const cards = ['1h', '15m'].map((tf) => {
     const row = usdtD[tf];
-    if (!row) {
+    if (!row || !row.lastSignal) {
       return `<div class="usdt-d-card">
         <div class="usdt-d-tf">${tf}</div>
-        <div class="usdt-d-empty">本周期暂无（通常是采样点 &lt; 80 根，稍后重试）</div>
+        <div class="usdt-d-empty">本周期暂无有效序列（对齐后仍 &lt; 80 根或指标未就绪）</div>
       </div>`;
     }
     const ls = row.lastSignal;
     const comb = row.combined;
-    const spark = sparklineSvg(row.spark, comb && comb.dir === 'short' ? 'down' : 'up');
+    const at = row.alpha;
+    const spark = sparklineSvg(row.spark, ls && ls.dir === 'up' ? 'down' : 'up');
     return `<div class="usdt-d-card">
       <div class="usdt-d-card-h">
         <span class="usdt-d-tf">${tf}</span>
@@ -1213,17 +1240,18 @@ function renderUsdtDBox(usdtD) {
       </div>
       <div class="usdt-d-line">${row.trendLabel || '--'} · ${ls ? ls.label + ' ' + (ls.timeAgoText || '') : '尚无穿越'}</div>
       <div class="usdt-d-line">过滤 ${emaFilterText(row)}</div>
-      <div class="usdt-d-line">AT ${alphaHtml(row.alpha)} · 合成 ${combinedHtml(row)}</div>
+      <div class="usdt-d-line">AT ${alphaHtml(at)} · 合成 ${combinedHtml(row)}</div>
       <div class="usdt-d-line bias">${row.cryptoBiasLabel || '偏多/偏空待定（看穿越方向）'}</div>
       ${comb && comb.reason ? `<div class="usdt-d-hint">${comb.reason}</div>` : ''}
+      ${at && at.lastEventLabel ? `<div class="usdt-d-hint">AT事件：${at.lastEventLabel}</div>` : ''}
     </div>`;
   }).join('');
   el.innerHTML = `
     <h3>USDT.D（稳定币市值占比）短线分析</h3>
     <div class="usdt-d-grid">${cards}</div>
     <div class="usdt-d-note">
-      币安无 USDT.D 合约：用 Tether/(BTC+ETH+USDT) 市值比代理${Number.isFinite(meta.scaleTo) ? `，并校准到全球占比 ${Number(meta.scaleTo).toFixed(2)}%` : ''}。
-      上穿 EMA56 ≈ 资金进稳定币（对风险资产偏空）；下穿相反。
+      币安无 USDT.D 合约：用 USDT 流通市值 / (BTC+ETH+USDT) 代理${Number.isFinite(meta.scaleTo) ? `，并校准到全球占比约 ${Number(meta.scaleTo).toFixed(2)}%` : ''}。
+      <strong>读法：</strong>USDT.D 上穿 EMA56 ≈ 资金进稳定币，对 BTC/ETH 偏空；下穿相反。
       ${meta.source ? `数据源：${meta.source}` : ''}
       ${meta.bars1h != null ? `· 1h ${meta.bars1h} 根` : ''}
       ${meta.bars15 != null ? `· 15m ${meta.bars15} 根` : ''}
@@ -1262,17 +1290,38 @@ function setEmaNote(data) {
     : `K线拉取失败${err ? '：' + err : '。Worker 访问币安被拦时，等 GitHub Actions 扫描写入后再刷新。'}`;
 }
 
+function usdtDReady(data) {
+  if (!data) return false;
+  const a = data['1h'];
+  const b = data['15m'];
+  // 需要至少一周期有完整 enrich（含 alpha），避免旧缓存只有裸 EMA
+  return [a, b].some((row) => row && row.lastSignal && row.alpha && row.combined);
+}
+
 async function loadUsdtD(board, force) {
   if (!force) {
     const hit = lsGet(LS_USDTD, USDTD_TTL_MS);
-    if (hit && (hit['1h'] || hit['15m'])) {
+    if (usdtDReady(hit)) {
       board.usdtD = hit;
       renderUsdtDBox(hit);
       return;
     }
   }
 
-  // 1) 优先 Worker（服务端拉 CG，不受浏览器 CORS/限流影响）
+  // 1) 浏览器币安代理（主路径，稳定）
+  try {
+    const data = await fetchUsdtDInBrowser();
+    if (usdtDReady(data) || (data && (data['1h'] || data['15m']))) {
+      board.usdtD = data;
+      if (usdtDReady(data)) lsSet(LS_USDTD, data);
+      renderUsdtDBox(data);
+      if (usdtDReady(data)) return;
+    }
+  } catch (e) {
+    console.warn('USDT.D browser path failed', e.message || e);
+  }
+
+  // 2) Worker 兜底
   try {
     const snap = await fetchJSON('/api/ema-strategy');
     if (snap && snap.usdtD && (snap.usdtD['1h'] || snap.usdtD['15m'])) {
@@ -1281,7 +1330,7 @@ async function loadUsdtD(board, force) {
         meta: { ...(snap.usdtD.meta || {}), source: snap.source ? `Worker(${snap.source})` : 'Worker' },
       };
       board.usdtD = data;
-      lsSet(LS_USDTD, data);
+      if (usdtDReady(data)) lsSet(LS_USDTD, data);
       renderUsdtDBox(data);
       return;
     }
@@ -1289,21 +1338,15 @@ async function loadUsdtD(board, force) {
     console.warn('USDT.D worker fallback miss', e.message || e);
   }
 
-  // 2) 浏览器直连 CG（可能限流/失败）
-  try {
-    const data = await fetchUsdtDInBrowser();
-    board.usdtD = data;
-    if (data && (data['1h'] || data['15m'])) lsSet(LS_USDTD, data);
-    renderUsdtDBox(data);
-  } catch (e) {
-    board.errors.push('USDT.D: ' + (e.message || e));
-    if (!board.usdtD || (!board.usdtD['1h'] && !board.usdtD['15m'])) renderUsdtDBox(null);
-  }
+  board.errors.push('USDT.D: 浏览器与 Worker 均未拿到有效序列');
+  if (!board.usdtD || (!board.usdtD['1h'] && !board.usdtD['15m'])) renderUsdtDBox(null);
 }
 
 async function loadEmaStrategy(force = false) {
   const note = document.getElementById('emaBoardNote');
   const board = emptyBoard();
+  // USDT.D 独立在策略看板上方，尽早并行加载
+  const usdtPromise = loadUsdtD(board, force);
   const cachedHits = hydrateBoardFromCache(board);
   if (cachedHits) {
     paintEmaBoard(board, { immediate: true, notify: true });
@@ -1374,7 +1417,7 @@ async function loadEmaStrategy(force = false) {
     if (note) note.textContent = e.message || 'fetch failed';
   }
 
-  loadUsdtD(board, force);
+  await usdtPromise;
 }
 
 async function fetchOverview() {

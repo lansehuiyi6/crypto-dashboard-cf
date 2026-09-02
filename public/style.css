@@ -671,11 +671,11 @@ body {
 }
 
 .usdt-d-box {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(210, 153, 34, 0.3);
-  background: rgba(210, 153, 34, 0.05);
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  background: rgba(210, 153, 34, 0.06);
   font-size: 12px;
   line-height: 1.6;
 }
