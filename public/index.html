@@ -55,6 +55,13 @@
           </div>
         </div>
         <p class="ema-board-lead">合成信号看开仓；穿越只是标记。MACD+KDJ / Keltner 为独立层（不进共振）。Keltner 单边过滤：15m 看 1h ADX（背景 4h），1h 看 4h ADX。开启通知后重要变化会提醒（需保持页面开启）。</p>
+        <div class="ema-temp-bar" id="emaTempBar">
+          <label class="ema-temp-label" for="emaTempSymbol">临时币对</label>
+          <input type="text" id="emaTempSymbol" class="ema-temp-input" placeholder="如 DOGE / PEPEUSDT" autocomplete="off" spellcheck="false" maxlength="20">
+          <button type="button" class="ema-temp-add-btn" id="emaTempAddBtn">添加</button>
+          <span class="ema-temp-hint">保留 24h，仅本机；固定六种不变</span>
+          <span class="ema-temp-msg" id="emaTempMsg" role="status"></span>
+        </div>
         <details class="ema-board-help">
           <summary>策略说明</summary>
           <div class="ema-board-desc">
@@ -66,7 +73,7 @@
           </div>
         </details>
       </div>
-      <div class="ema-cards" id="emaCards">
+      <div class="ema-board-body" id="emaCards">
         <div class="empty">正在计算 15m / 1h 策略...</div>
       </div>
       <div class="ema-board-note" id="emaBoardNote"></div>

@@ -383,6 +383,95 @@ body {
   color: var(--text-secondary);
 }
 
+.ema-temp-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px dashed rgba(210, 153, 34, 0.4);
+  background: rgba(210, 153, 34, 0.06);
+}
+
+.ema-temp-label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--amber);
+}
+
+.ema-temp-input {
+  width: min(160px, 42vw);
+  appearance: none;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.ema-temp-input:focus {
+  outline: none;
+  border-color: rgba(210, 153, 34, 0.65);
+  box-shadow: 0 0 0 2px rgba(210, 153, 34, 0.15);
+}
+
+.ema-temp-add-btn {
+  appearance: none;
+  border: 1px solid rgba(210, 153, 34, 0.5);
+  background: rgba(210, 153, 34, 0.14);
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.ema-temp-add-btn:hover {
+  background: rgba(210, 153, 34, 0.22);
+}
+
+.ema-temp-add-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ema-temp-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.ema-temp-msg {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-height: 1em;
+}
+
+.ema-temp-msg.err { color: var(--up); }
+.ema-temp-msg.ok { color: var(--teal); }
+
+.ema-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 14px 0 8px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--amber);
+  letter-spacing: 0.02em;
+}
+
+.ema-section-head .ema-section-note {
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
 .ema-board-help {
   margin: 0 0 14px;
 }
@@ -434,6 +523,12 @@ body {
   margin-bottom: 0;
 }
 
+.ema-board-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
 .ema-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
@@ -463,6 +558,67 @@ body {
 .ema-coin-card.accent-long::before { background: var(--teal); }
 .ema-coin-card.accent-short::before { background: var(--up); }
 
+.ema-coin-card.is-temp {
+  border-style: dashed;
+  border-color: rgba(210, 153, 34, 0.45);
+  background:
+    linear-gradient(180deg, rgba(210, 153, 34, 0.06), transparent 42%),
+    var(--bg-primary);
+}
+
+.ema-coin-card.is-temp::before {
+  background: var(--amber);
+  width: 3px;
+  opacity: 0.85;
+}
+
+.ema-coin-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ema-temp-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--amber);
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  background: rgba(210, 153, 34, 0.12);
+}
+
+.ema-temp-ttl {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.ema-temp-remove {
+  appearance: none;
+  margin-left: auto;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-tertiary);
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.ema-temp-remove:hover {
+  color: var(--up);
+  border-color: rgba(248, 81, 73, 0.45);
+  background: rgba(248, 81, 73, 0.08);
+}
+
 .ema-coin-head {
   display: flex;
   justify-content: space-between;
@@ -476,6 +632,24 @@ body {
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.signal-card.is-temp {
+  border-style: dashed;
+  border-color: rgba(210, 153, 34, 0.4);
+}
+
+.sc-temp-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--amber);
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  background: rgba(210, 153, 34, 0.12);
 }
 
 .ema-coin-price {

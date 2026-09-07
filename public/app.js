@@ -121,8 +121,250 @@ async function fetchBinancePricesClient() {
 
 const LS_KLINE = 'cd:kl:';
 const LS_USDTD = 'cd:usdtd:v3';
+const LS_TEMP_PAIRS = 'cd:ema:temp-pairs';
 const USDTD_TTL_MS = 30 * 60 * 1000;
 const KLINE_STALE_MAX_MS = 30 * 60 * 1000;
+const TEMP_PAIR_TTL_MS = 24 * 60 * 60 * 1000;
+const TEMP_PAIR_MAX = 8;
+
+function readTempPairsRaw() {
+  try {
+    const raw = localStorage.getItem(LS_TEMP_PAIRS);
+    if (!raw) return [];
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeTempPairs(list) {
+  try {
+    localStorage.setItem(LS_TEMP_PAIRS, JSON.stringify(list));
+  } catch { /* quota / private mode */ }
+}
+
+/** @returns {{ coin: string, symbol: string, addedAt: number }[]} */
+function listTempPairs() {
+  const now = Date.now();
+  const raw = readTempPairsRaw();
+  const kept = raw.filter((p) => p
+    && typeof p.coin === 'string'
+    && typeof p.symbol === 'string'
+    && Number.isFinite(p.addedAt)
+    && now - p.addedAt < TEMP_PAIR_TTL_MS);
+  if (kept.length !== raw.length) writeTempPairs(kept);
+  return kept;
+}
+
+function getTempPairMeta(coin) {
+  return listTempPairs().find((p) => p.coin === coin) || null;
+}
+
+function isTempPair(coin) {
+  return !!getTempPairMeta(coin);
+}
+
+function getStrategySymbolMap() {
+  const map = { ...STRATEGY_SYMBOLS };
+  for (const p of listTempPairs()) {
+    if (!STRATEGY_SYMBOLS[p.coin]) map[p.coin] = p.symbol;
+  }
+  return map;
+}
+
+function normalizeTempPairInput(raw) {
+  let s = String(raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!s) return null;
+  if (s.endsWith('USD') && !s.endsWith('USDT')) s += 'T';
+  if (!s.endsWith('USDT')) s += 'USDT';
+  const coin = s.slice(0, -4);
+  if (!coin || coin.length < 2 || coin.length > 15) return null;
+  if (!/^[A-Z0-9]+$/.test(coin)) return null;
+  return { coin, symbol: s };
+}
+
+function formatTempTtl(addedAt) {
+  const left = TEMP_PAIR_TTL_MS - (Date.now() - addedAt);
+  if (left <= 0) return '即将移除';
+  const h = Math.floor(left / (60 * 60 * 1000));
+  const m = Math.floor((left % (60 * 60 * 1000)) / (60 * 1000));
+  if (h >= 1) return `剩余 ${h}h`;
+  return `剩余 ${Math.max(1, m)}m`;
+}
+
+function setTempPairMsg(text, kind = '') {
+  const el = document.getElementById('emaTempMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.remove('ok', 'err');
+  if (kind) el.classList.add(kind);
+}
+
+function removeTempPair(coin, { reload = true } = {}) {
+  const next = listTempPairs().filter((p) => p.coin !== coin);
+  writeTempPairs(next);
+  if (lastEmaBoard) {
+    for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+      if (lastEmaBoard[tf]) delete lastEmaBoard[tf][coin];
+    }
+    if (lastEmaBoard.adx4h) delete lastEmaBoard.adx4h[coin];
+    paintEmaBoard(lastEmaBoard, { immediate: true });
+  }
+  setTempPairMsg(`${coin} 已移除`, 'ok');
+  if (reload) {
+    // no network needed; board already pruned
+  }
+}
+
+async function validateBinanceUsdtSymbol(symbol) {
+  const lim = 5;
+  const makers = [
+    (s) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=1h&limit=${lim}`,
+    (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=1h&limit=${lim}`,
+    (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=1h&limit=${lim}`,
+  ];
+  for (const make of makers) {
+    try {
+      const res = await fetch(make(symbol));
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) return true;
+    } catch { /* try next */ }
+  }
+  return false;
+}
+
+async function fetchSymbolIntoBoard(board, coin, symbol, force = false) {
+  board.errors = Array.isArray(board.errors) ? board.errors : [];
+  board.adx4h = board.adx4h || {};
+  for (const interval of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+    board[interval] = board[interval] || {};
+  }
+  const execJobs = EXEC_INTERVALS.map(async (interval) => {
+    try {
+      const klines = await getKlinesCached(symbol, interval, force);
+      const row = rowFromKlines(klines, coin, interval);
+      board[interval][coin] = row;
+      if (!row) board.errors.push(coin + ' ' + interval + ': 指标不足');
+    } catch (e) {
+      if (!board[interval][coin]) {
+        board[interval][coin] = null;
+        board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+      }
+    }
+  });
+  const htfJobs = HTF_INTERVALS.map(async (interval) => {
+    try {
+      const klines = await getKlinesCached(symbol, interval, force, interval === '1d' ? 120 : 140);
+      const mk = macdKdjFromKlines(klines, coin, interval);
+      board[interval][coin] = mk;
+      if (!mk) board.errors.push(coin + ' ' + interval + ': MACD+KDJ 不足');
+      if (interval === '4h') {
+        const adx = evaluateAdx(klines, { interval: '4h' });
+        if (adx) board.adx4h[coin] = adx;
+      }
+    } catch (e) {
+      if (!board[interval][coin]) {
+        board[interval][coin] = null;
+        board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+      }
+    }
+  });
+  await Promise.all([...execJobs, ...htfJobs]);
+  board.cached = false;
+  board.fetchedAt = Date.now();
+}
+
+async function addTempPairFromUi() {
+  const input = document.getElementById('emaTempSymbol');
+  const btn = document.getElementById('emaTempAddBtn');
+  const parsed = normalizeTempPairInput(input && input.value);
+  if (!parsed) {
+    setTempPairMsg('请输入有效币对，如 DOGE', 'err');
+    return;
+  }
+  if (STRATEGY_SYMBOLS[parsed.coin]) {
+    setTempPairMsg(`${parsed.coin} 已是固定币对`, 'err');
+    return;
+  }
+  const existing = listTempPairs();
+  if (existing.some((p) => p.coin === parsed.coin || p.symbol === parsed.symbol)) {
+    setTempPairMsg(`${parsed.coin} 已在临时列表`, 'err');
+    return;
+  }
+  if (existing.length >= TEMP_PAIR_MAX) {
+    setTempPairMsg(`临时币对最多 ${TEMP_PAIR_MAX} 个`, 'err');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  setTempPairMsg(`正在校验 ${parsed.symbol}…`);
+  try {
+    const ok = await validateBinanceUsdtSymbol(parsed.symbol);
+    if (!ok) {
+      setTempPairMsg(`币安未找到 ${parsed.symbol}`, 'err');
+      return;
+    }
+    const next = [...listTempPairs(), { coin: parsed.coin, symbol: parsed.symbol, addedAt: Date.now() }];
+    writeTempPairs(next);
+    if (input) input.value = '';
+    setTempPairMsg(`已添加 ${parsed.coin}（24h）`, 'ok');
+    const board = lastEmaBoard ? lastEmaBoard : emptyBoard();
+    // 立刻画出临时卡，再只拉这一个币对，避免 force 刷新整板
+    paintEmaBoard(board, { immediate: true });
+    await fetchSymbolIntoBoard(board, parsed.coin, parsed.symbol, true);
+    paintEmaBoard(board, { immediate: true, notify: true });
+    setEmaNote(board);
+  } catch (e) {
+    setTempPairMsg(e.message || '添加失败', 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initTempPairUi() {
+  const input = document.getElementById('emaTempSymbol');
+  const btn = document.getElementById('emaTempAddBtn');
+  if (btn) btn.addEventListener('click', () => { addTempPairFromUi().catch(() => {}); });
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addTempPairFromUi().catch(() => {});
+      }
+    });
+  }
+  const box = document.getElementById('emaCards');
+  if (box) {
+    box.addEventListener('click', (e) => {
+      const rem = e.target.closest('[data-temp-remove]');
+      if (!rem) return;
+      e.preventDefault();
+      removeTempPair(rem.getAttribute('data-temp-remove'));
+    });
+  }
+}
+
+function mergeTempRowsIntoBoard(base, client) {
+  if (!base) return client;
+  if (!client) return base;
+  const out = {
+    ...base,
+    errors: [...(Array.isArray(base.errors) ? base.errors : []), ...(Array.isArray(client.errors) ? client.errors : [])],
+    adx4h: { ...(base.adx4h || {}) },
+  };
+  for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+    out[tf] = { ...(base[tf] || {}) };
+  }
+  for (const p of listTempPairs()) {
+    for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+      if (client[tf] && client[tf][p.coin] != null) out[tf][p.coin] = client[tf][p.coin];
+    }
+    if (client.adx4h && client.adx4h[p.coin] != null) out.adx4h[p.coin] = client.adx4h[p.coin];
+  }
+  if (client.usdtD && (client.usdtD['1h'] || client.usdtD['15m'])) out.usdtD = client.usdtD;
+  return out;
+}
 
 function lsGet(key, maxAgeMs) {
   try {
@@ -249,7 +491,7 @@ function snapshotEmaAlerts(board) {
   const out = {};
   if (!board) return out;
   for (const tf of EXEC_INTERVALS) {
-    for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+    for (const coin of Object.keys(getStrategySymbolMap())) {
       const row = board[tf] && board[tf][coin];
       if (!row) continue;
       const c = row.combined || {};
@@ -543,7 +785,7 @@ function macdKdjFromKlines(klines, coin, interval) {
 
 function enrichBoardMacdKdj(board) {
   for (const tf of EXEC_INTERVALS) {
-    for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+    for (const coin of Object.keys(getStrategySymbolMap())) {
       const row = board[tf] && board[tf][coin];
       if (!row || !row.macdKdj) continue;
       row.macdKdjView = annotateMacdKdjContext(row.macdKdj, board['4h']?.[coin], board['1d']?.[coin]);
@@ -554,7 +796,7 @@ function enrichBoardMacdKdj(board) {
 
 function enrichBoardKeltnerAdx(board) {
   if (!board) return;
-  for (const coin of Object.keys(STRATEGY_SYMBOLS)) {
+  for (const coin of Object.keys(getStrategySymbolMap())) {
     const row15 = board['15m'] && board['15m'][coin];
     const row1h = board['1h'] && board['1h'][coin];
     const adx1h = row1h && row1h.adx;
@@ -587,7 +829,7 @@ function enrichBoardKeltnerAdx(board) {
 
 function hydrateBoardFromCache(board) {
   let hits = 0;
-  for (const [coin, symbol] of Object.entries(STRATEGY_SYMBOLS)) {
+  for (const [coin, symbol] of Object.entries(getStrategySymbolMap())) {
     for (const interval of EXEC_INTERVALS) {
       const cached = lsGet(LS_KLINE + symbol + ':' + interval, KLINE_STALE_MAX_MS);
       if (!cached) continue;
@@ -1138,39 +1380,56 @@ function renderEmaTfCol(tf, row) {
   </div>`;
 }
 
+function renderOneEmaCard(data, coin, tempMeta) {
+  const r15 = data && data['15m'] && data['15m'][coin];
+  const r1h = data && data['1h'] && data['1h'][coin];
+  const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || '';
+  const d15 = combinedDir(r15);
+  const d1h = combinedDir(r1h);
+  const accent = d15 === d1h && d15 !== 'watch' ? d15 : (d1h !== 'watch' ? d1h : d15);
+  const spark = sparklineSvg((r1h && r1h.spark) || (r15 && r15.spark), accent === 'short' ? 'down' : 'up');
+  const isTemp = !!tempMeta;
+  const titleExtra = isTemp
+    ? `<span class="ema-temp-badge">临时</span><span class="ema-temp-ttl">${formatTempTtl(tempMeta.addedAt)}</span>
+       <button type="button" class="ema-temp-remove" data-temp-remove="${coin}" title="移除临时币对" aria-label="移除 ${coin}">×</button>`
+    : '';
+  return `<article class="ema-coin-card accent-${accent}${isTemp ? ' is-temp' : ''}">
+    <div class="ema-coin-head">
+      <div class="ema-coin-id">
+        <div class="ema-coin-title-row">
+          <h3>${coin}</h3>
+          ${titleExtra}
+        </div>
+        <div class="ema-coin-price-row">
+          ${px ? `<div class="ema-coin-price">${px}</div>` : ''}
+          ${spark}
+        </div>
+      </div>
+      <div class="ema-summary">
+        <div class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(r15)}</div>
+        <div class="ema-summary-item"><span class="ema-tf">1h</span>${combinedHtml(r1h)}</div>
+      </div>
+    </div>
+    ${macdKdjBgHtml(data, coin)}
+    <div class="ema-tf-cols">
+      ${renderEmaTfCol('15m', r15)}
+      ${renderEmaTfCol('1h', r1h)}
+    </div>
+  </article>`;
+}
+
 function renderEmaCards(data) {
   const box = document.getElementById('emaCards');
   if (!box) return;
-  const coins = Object.keys(STRATEGY_SYMBOLS);
-  box.innerHTML = coins.map((coin) => {
-    const r15 = data && data['15m'] && data['15m'][coin];
-    const r1h = data && data['1h'] && data['1h'][coin];
-    const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || '';
-    const d15 = combinedDir(r15);
-    const d1h = combinedDir(r1h);
-    const accent = d15 === d1h && d15 !== 'watch' ? d15 : (d1h !== 'watch' ? d1h : d15);
-    const spark = sparklineSvg((r1h && r1h.spark) || (r15 && r15.spark), accent === 'short' ? 'down' : 'up');
-    return `<article class="ema-coin-card accent-${accent}">
-      <div class="ema-coin-head">
-        <div class="ema-coin-id">
-          <h3>${coin}</h3>
-          <div class="ema-coin-price-row">
-            ${px ? `<div class="ema-coin-price">${px}</div>` : ''}
-            ${spark}
-          </div>
-        </div>
-        <div class="ema-summary">
-          <div class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(r15)}</div>
-          <div class="ema-summary-item"><span class="ema-tf">1h</span>${combinedHtml(r1h)}</div>
-        </div>
-      </div>
-      ${macdKdjBgHtml(data, coin)}
-      <div class="ema-tf-cols">
-        ${renderEmaTfCol('15m', r15)}
-        ${renderEmaTfCol('1h', r1h)}
-      </div>
-    </article>`;
-  }).join('');
+  const fixed = Object.keys(STRATEGY_SYMBOLS);
+  const temps = listTempPairs();
+  const fixedHtml = fixed.map((coin) => renderOneEmaCard(data, coin, null)).join('');
+  const tempHtml = temps.map((p) => renderOneEmaCard(data, p.coin, p)).join('');
+  const tempSection = temps.length
+    ? `<div class="ema-section-head">临时关注 <span class="ema-section-note">虚线卡片 · 24h 后自动移除 · 仅本机</span></div>
+       <div class="ema-cards ema-cards-temp">${tempHtml}</div>`
+    : '';
+  box.innerHTML = `<div class="ema-cards">${fixedHtml}</div>${tempSection}`;
 }
 
 let paintBoardTimer = null;
@@ -1345,6 +1604,7 @@ async function loadUsdtD(board, force) {
 async function loadEmaStrategy(force = false) {
   const note = document.getElementById('emaBoardNote');
   const board = emptyBoard();
+  const symbols = getStrategySymbolMap();
   // USDT.D 独立在策略看板上方，尽早并行加载
   const usdtPromise = loadUsdtD(board, force);
   const cachedHits = hydrateBoardFromCache(board);
@@ -1355,7 +1615,7 @@ async function loadEmaStrategy(force = false) {
 
   try {
     const execJobs = EXEC_INTERVALS.flatMap((interval) =>
-      Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
+      Object.entries(symbols).map(async ([coin, symbol]) => {
         try {
           const klines = await getKlinesCached(symbol, interval, force);
           const row = rowFromKlines(klines, coin, interval);
@@ -1373,7 +1633,7 @@ async function loadEmaStrategy(force = false) {
       }),
     );
     const htfJobs = HTF_INTERVALS.flatMap((interval) =>
-      Object.entries(STRATEGY_SYMBOLS).map(async ([coin, symbol]) => {
+      Object.entries(symbols).map(async ([coin, symbol]) => {
         try {
           // 4h/1d 用不那么长的序列即可
           const klines = await getKlinesCached(symbol, interval, force, interval === '1d' ? 120 : 140);
@@ -1401,8 +1661,9 @@ async function loadEmaStrategy(force = false) {
     if (!boardHasClientRows(board)) {
       try {
         const fallback = await fetchJSON('/api/ema-strategy');
-        paintEmaBoard(fallback, { immediate: true, notify: true });
-        setEmaNote(fallback);
+        const merged = mergeTempRowsIntoBoard(fallback, board);
+        paintEmaBoard(merged, { immediate: true, notify: true });
+        setEmaNote(merged);
       } catch (e) {
         console.warn('browser klines fallback to worker', e.message);
         setEmaNote(board);
@@ -1684,10 +1945,48 @@ function clientEssayHtml(tfLabel, ema, s1, r1) {
   return parts.join('');
 }
 
+function tempShortSignalFromBoard(coin) {
+  const e15 = lastEmaBoard && lastEmaBoard['15m'] && lastEmaBoard['15m'][coin];
+  const e1h = lastEmaBoard && lastEmaBoard['1h'] && lastEmaBoard['1h'][coin];
+  if (!e15 && !e1h) return null;
+  const d15 = combinedDir(e15);
+  const d1h = combinedDir(e1h);
+  const bias = d1h !== 'watch' ? d1h : d15;
+  const biasLabel = bias === 'long' ? '偏多（临时）' : bias === 'short' ? '偏空（临时）' : '观望（临时）';
+  const stop = (e15 && e15.stopText) || (e1h && e1h.stopText) || '--';
+  const tp = (e15 && e15.tpText) || (e1h && e1h.tpText) || '--';
+  const comb = (e1h && e1h.combined) || (e15 && e15.combined);
+  const play = comb && comb.reason
+    ? comb.reason
+    : '临时币对：按看板 15m/1h 合成与分层信号操作，点位仅供参考。';
+  return {
+    coin,
+    temporary: true,
+    bias: biasLabel,
+    color: bias === 'long' ? 'blue' : bias === 'short' ? 'amber' : 'gray',
+    priceText: (e15 && e15.priceText) || (e1h && e1h.priceText) || '--',
+    changeText: '',
+    change24h: 0,
+    support: stop,
+    resistance: tp,
+    strategy: play,
+    ema15: e15,
+    ema1h: e1h,
+  };
+}
+
+function collectShortSignalsForRender() {
+  const fixed = lastShortSignals || [];
+  const temps = listTempPairs()
+    .map((p) => tempShortSignalFromBoard(p.coin))
+    .filter(Boolean);
+  return [...fixed, ...temps];
+}
+
 function renderShortSignalCards() {
   const box = document.getElementById('signalList');
   if (!box) return;
-  const signals = lastShortSignals;
+  const signals = collectShortSignalsForRender();
   if (!signals.length) {
     box.innerHTML = '<div class="empty">等待价格快照后生成点位</div>';
     return;
@@ -1704,11 +2003,12 @@ function renderShortSignalCards() {
     const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
     const ls15 = e15 && e15.lastSignal;
     const ls1h = e1h && e1h.lastSignal;
+    const tempBadge = s.temporary ? '<span class="sc-temp-badge">临时</span>' : '';
     return `
-      <div class="signal-card ${sigColors[s.color] || ''}">
+      <div class="signal-card ${sigColors[s.color] || ''}${s.temporary ? ' is-temp' : ''}">
         <div class="sc-top">
           <div>
-            <div class="sc-name">${s.coin}</div>
+            <div class="sc-name">${s.coin}${tempBadge}</div>
             <div class="sc-bias">${s.bias || ''}</div>
           </div>
           <div class="sc-px">
@@ -2125,6 +2425,7 @@ document.getElementById('refreshBtn').addEventListener('click', () => {
 });
 
 initEmaNotifyUi();
+initTempPairUi();
 refreshAll();
 setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
