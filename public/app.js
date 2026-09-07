@@ -122,14 +122,16 @@ async function fetchBinancePricesClient() {
 const LS_KLINE = 'cd:kl:';
 const LS_USDTD = 'cd:usdtd:v3';
 const LS_TEMP_PAIRS = 'cd:ema:temp-pairs';
+const LS_PINNED_PAIRS = 'cd:ema:pinned-pairs';
 const USDTD_TTL_MS = 30 * 60 * 1000;
 const KLINE_STALE_MAX_MS = 30 * 60 * 1000;
 const TEMP_PAIR_TTL_MS = 24 * 60 * 60 * 1000;
 const TEMP_PAIR_MAX = 8;
+const PINNED_PAIR_MAX = 12;
 
-function readTempPairsRaw() {
+function readJsonList(key) {
   try {
-    const raw = localStorage.getItem(LS_TEMP_PAIRS);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const data = JSON.parse(raw);
     return Array.isArray(data) ? data : [];
@@ -138,22 +140,57 @@ function readTempPairsRaw() {
   }
 }
 
-function writeTempPairs(list) {
+function writeJsonList(key, list) {
   try {
-    localStorage.setItem(LS_TEMP_PAIRS, JSON.stringify(list));
+    localStorage.setItem(key, JSON.stringify(list));
   } catch { /* quota / private mode */ }
+}
+
+function readTempPairsRaw() {
+  return readJsonList(LS_TEMP_PAIRS);
+}
+
+function writeTempPairs(list) {
+  writeJsonList(LS_TEMP_PAIRS, list);
+}
+
+function writePinnedPairs(list) {
+  writeJsonList(LS_PINNED_PAIRS, list);
 }
 
 /** @returns {{ coin: string, symbol: string, addedAt: number }[]} */
 function listTempPairs() {
   const now = Date.now();
+  const pinnedCoins = new Set(listPinnedPairs().map((p) => p.coin));
   const raw = readTempPairsRaw();
   const kept = raw.filter((p) => p
     && typeof p.coin === 'string'
     && typeof p.symbol === 'string'
     && Number.isFinite(p.addedAt)
-    && now - p.addedAt < TEMP_PAIR_TTL_MS);
+    && now - p.addedAt < TEMP_PAIR_TTL_MS
+    && !STRATEGY_SYMBOLS[p.coin]
+    && !pinnedCoins.has(p.coin));
   if (kept.length !== raw.length) writeTempPairs(kept);
+  return kept;
+}
+
+/** @returns {{ coin: string, symbol: string, pinnedAt: number }[]} */
+function listPinnedPairs() {
+  const raw = readJsonList(LS_PINNED_PAIRS);
+  let dirty = false;
+  const kept = [];
+  for (const p of raw) {
+    if (!p || typeof p.coin !== 'string' || typeof p.symbol !== 'string' || STRATEGY_SYMBOLS[p.coin]) {
+      dirty = true;
+      continue;
+    }
+    const pinnedAt = Number.isFinite(p.pinnedAt)
+      ? p.pinnedAt
+      : (Number.isFinite(p.addedAt) ? p.addedAt : Date.now());
+    if (p.pinnedAt !== pinnedAt) dirty = true;
+    kept.push({ coin: p.coin, symbol: p.symbol, pinnedAt });
+  }
+  if (dirty || kept.length !== raw.length) writePinnedPairs(kept);
   return kept;
 }
 
@@ -161,16 +198,31 @@ function getTempPairMeta(coin) {
   return listTempPairs().find((p) => p.coin === coin) || null;
 }
 
-function isTempPair(coin) {
-  return !!getTempPairMeta(coin);
+function getPinnedPairMeta(coin) {
+  return listPinnedPairs().find((p) => p.coin === coin) || null;
+}
+
+function getExtraWatchPairs() {
+  return [...listPinnedPairs(), ...listTempPairs()];
 }
 
 function getStrategySymbolMap() {
   const map = { ...STRATEGY_SYMBOLS };
+  for (const p of listPinnedPairs()) {
+    if (!map[p.coin]) map[p.coin] = p.symbol;
+  }
   for (const p of listTempPairs()) {
-    if (!STRATEGY_SYMBOLS[p.coin]) map[p.coin] = p.symbol;
+    if (!map[p.coin]) map[p.coin] = p.symbol;
   }
   return map;
+}
+
+function pruneCoinFromBoard(coin) {
+  if (!lastEmaBoard || !coin) return;
+  for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+    if (lastEmaBoard[tf]) delete lastEmaBoard[tf][coin];
+  }
+  if (lastEmaBoard.adx4h) delete lastEmaBoard.adx4h[coin];
 }
 
 function normalizeTempPairInput(raw) {
@@ -201,20 +253,44 @@ function setTempPairMsg(text, kind = '') {
   if (kind) el.classList.add(kind);
 }
 
-function removeTempPair(coin, { reload = true } = {}) {
-  const next = listTempPairs().filter((p) => p.coin !== coin);
-  writeTempPairs(next);
-  if (lastEmaBoard) {
-    for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
-      if (lastEmaBoard[tf]) delete lastEmaBoard[tf][coin];
-    }
-    if (lastEmaBoard.adx4h) delete lastEmaBoard.adx4h[coin];
-    paintEmaBoard(lastEmaBoard, { immediate: true });
+function removeTempPair(coin) {
+  writeTempPairs(listTempPairs().filter((p) => p.coin !== coin));
+  pruneCoinFromBoard(coin);
+  if (lastEmaBoard) paintEmaBoard(lastEmaBoard, { immediate: true });
+  setTempPairMsg(`${coin} 已移除临时关注`, 'ok');
+}
+
+function promoteTempToPinned(coin) {
+  if (!coin || STRATEGY_SYMBOLS[coin]) {
+    setTempPairMsg(`${coin || ''} 已是系统固定币对`, 'err');
+    return;
   }
-  setTempPairMsg(`${coin} 已移除`, 'ok');
-  if (reload) {
-    // no network needed; board already pruned
+  const temp = getTempPairMeta(coin);
+  const already = getPinnedPairMeta(coin);
+  if (already) {
+    setTempPairMsg(`${coin} 已在本机常驻`, 'err');
+    return;
   }
+  if (!temp) {
+    setTempPairMsg(`未找到临时币对 ${coin}`, 'err');
+    return;
+  }
+  const pinned = listPinnedPairs();
+  if (pinned.length >= PINNED_PAIR_MAX) {
+    setTempPairMsg(`本机常驻最多 ${PINNED_PAIR_MAX} 个`, 'err');
+    return;
+  }
+  writeTempPairs(listTempPairs().filter((p) => p.coin !== coin));
+  writePinnedPairs([...pinned, { coin: temp.coin, symbol: temp.symbol, pinnedAt: Date.now() }]);
+  if (lastEmaBoard) paintEmaBoard(lastEmaBoard, { immediate: true });
+  setTempPairMsg(`${coin} 已转本机常驻`, 'ok');
+}
+
+function unpinPinnedPair(coin) {
+  writePinnedPairs(listPinnedPairs().filter((p) => p.coin !== coin));
+  pruneCoinFromBoard(coin);
+  if (lastEmaBoard) paintEmaBoard(lastEmaBoard, { immediate: true });
+  setTempPairMsg(`${coin} 已取消本机常驻`, 'ok');
 }
 
 async function validateBinanceUsdtSymbol(symbol) {
@@ -285,7 +361,11 @@ async function addTempPairFromUi() {
     return;
   }
   if (STRATEGY_SYMBOLS[parsed.coin]) {
-    setTempPairMsg(`${parsed.coin} 已是固定币对`, 'err');
+    setTempPairMsg(`${parsed.coin} 已是系统固定币对`, 'err');
+    return;
+  }
+  if (getPinnedPairMeta(parsed.coin)) {
+    setTempPairMsg(`${parsed.coin} 已在本机常驻`, 'err');
     return;
   }
   const existing = listTempPairs();
@@ -337,6 +417,18 @@ function initTempPairUi() {
   const box = document.getElementById('emaCards');
   if (box) {
     box.addEventListener('click', (e) => {
+      const promote = e.target.closest('[data-temp-promote]');
+      if (promote) {
+        e.preventDefault();
+        promoteTempToPinned(promote.getAttribute('data-temp-promote'));
+        return;
+      }
+      const unpin = e.target.closest('[data-pinned-remove]');
+      if (unpin) {
+        e.preventDefault();
+        unpinPinnedPair(unpin.getAttribute('data-pinned-remove'));
+        return;
+      }
       const rem = e.target.closest('[data-temp-remove]');
       if (!rem) return;
       e.preventDefault();
@@ -356,7 +448,7 @@ function mergeTempRowsIntoBoard(base, client) {
   for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
     out[tf] = { ...(base[tf] || {}) };
   }
-  for (const p of listTempPairs()) {
+  for (const p of getExtraWatchPairs()) {
     for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
       if (client[tf] && client[tf][p.coin] != null) out[tf][p.coin] = client[tf][p.coin];
     }
@@ -1380,7 +1472,7 @@ function renderEmaTfCol(tf, row) {
   </div>`;
 }
 
-function renderOneEmaCard(data, coin, tempMeta) {
+function renderOneEmaCard(data, coin, kind = 'fixed', meta = null) {
   const r15 = data && data['15m'] && data['15m'][coin];
   const r1h = data && data['1h'] && data['1h'][coin];
   const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || '';
@@ -1388,12 +1480,21 @@ function renderOneEmaCard(data, coin, tempMeta) {
   const d1h = combinedDir(r1h);
   const accent = d15 === d1h && d15 !== 'watch' ? d15 : (d1h !== 'watch' ? d1h : d15);
   const spark = sparklineSvg((r1h && r1h.spark) || (r15 && r15.spark), accent === 'short' ? 'down' : 'up');
-  const isTemp = !!tempMeta;
-  const titleExtra = isTemp
-    ? `<span class="ema-temp-badge">临时</span><span class="ema-temp-ttl">${formatTempTtl(tempMeta.addedAt)}</span>
-       <button type="button" class="ema-temp-remove" data-temp-remove="${coin}" title="移除临时币对" aria-label="移除 ${coin}">×</button>`
-    : '';
-  return `<article class="ema-coin-card accent-${accent}${isTemp ? ' is-temp' : ''}">
+  const safeCoin = escAttr(coin);
+  let titleExtra = '';
+  let cardClass = `ema-coin-card accent-${accent}`;
+  if (kind === 'temp') {
+    cardClass += ' is-temp';
+    titleExtra = `<span class="ema-temp-badge">临时</span>
+      <span class="ema-temp-ttl">${formatTempTtl(meta && meta.addedAt)}</span>
+      <button type="button" class="ema-pin-btn" data-temp-promote="${safeCoin}" title="转为本机常驻">转常驻</button>
+      <button type="button" class="ema-temp-remove" data-temp-remove="${safeCoin}" title="移除临时币对" aria-label="移除 ${safeCoin}">×</button>`;
+  } else if (kind === 'pinned') {
+    cardClass += ' is-pinned';
+    titleExtra = `<span class="ema-pinned-badge">本机</span>
+      <button type="button" class="ema-unpin-btn" data-pinned-remove="${safeCoin}" title="取消本机常驻">取消常驻</button>`;
+  }
+  return `<article class="${cardClass}">
     <div class="ema-coin-head">
       <div class="ema-coin-id">
         <div class="ema-coin-title-row">
@@ -1422,14 +1523,20 @@ function renderEmaCards(data) {
   const box = document.getElementById('emaCards');
   if (!box) return;
   const fixed = Object.keys(STRATEGY_SYMBOLS);
+  const pinned = listPinnedPairs();
   const temps = listTempPairs();
-  const fixedHtml = fixed.map((coin) => renderOneEmaCard(data, coin, null)).join('');
-  const tempHtml = temps.map((p) => renderOneEmaCard(data, p.coin, p)).join('');
+  const fixedHtml = fixed.map((coin) => renderOneEmaCard(data, coin, 'fixed')).join('');
+  const pinnedHtml = pinned.map((p) => renderOneEmaCard(data, p.coin, 'pinned', p)).join('');
+  const tempHtml = temps.map((p) => renderOneEmaCard(data, p.coin, 'temp', p)).join('');
+  const pinnedSection = pinned.length
+    ? `<div class="ema-section-head ema-section-pinned">本机常驻 <span class="ema-section-note">无过期 · 仅本机 · 可取消</span></div>
+       <div class="ema-cards ema-cards-pinned">${pinnedHtml}</div>`
+    : '';
   const tempSection = temps.length
-    ? `<div class="ema-section-head">临时关注 <span class="ema-section-note">虚线卡片 · 24h 后自动移除 · 仅本机</span></div>
+    ? `<div class="ema-section-head">临时关注 <span class="ema-section-note">虚线卡片 · 24h 后自动移除 · 可转常驻</span></div>
        <div class="ema-cards ema-cards-temp">${tempHtml}</div>`
     : '';
-  box.innerHTML = `<div class="ema-cards">${fixedHtml}</div>${tempSection}`;
+  box.innerHTML = `<div class="ema-cards">${fixedHtml}</div>${pinnedSection}${tempSection}`;
 }
 
 let paintBoardTimer = null;
@@ -1945,23 +2052,25 @@ function clientEssayHtml(tfLabel, ema, s1, r1) {
   return parts.join('');
 }
 
-function tempShortSignalFromBoard(coin) {
+function extraShortSignalFromBoard(coin, kind) {
   const e15 = lastEmaBoard && lastEmaBoard['15m'] && lastEmaBoard['15m'][coin];
   const e1h = lastEmaBoard && lastEmaBoard['1h'] && lastEmaBoard['1h'][coin];
   if (!e15 && !e1h) return null;
   const d15 = combinedDir(e15);
   const d1h = combinedDir(e1h);
   const bias = d1h !== 'watch' ? d1h : d15;
-  const biasLabel = bias === 'long' ? '偏多（临时）' : bias === 'short' ? '偏空（临时）' : '观望（临时）';
+  const tag = kind === 'pinned' ? '本机' : '临时';
+  const biasLabel = bias === 'long' ? `偏多（${tag}）` : bias === 'short' ? `偏空（${tag}）` : `观望（${tag}）`;
   const stop = (e15 && e15.stopText) || (e1h && e1h.stopText) || '--';
   const tp = (e15 && e15.tpText) || (e1h && e1h.tpText) || '--';
   const comb = (e1h && e1h.combined) || (e15 && e15.combined);
   const play = comb && comb.reason
     ? comb.reason
-    : '临时币对：按看板 15m/1h 合成与分层信号操作，点位仅供参考。';
+    : `${tag}币对：按看板 15m/1h 合成与分层信号操作，点位仅供参考。`;
   return {
     coin,
-    temporary: true,
+    temporary: kind === 'temp',
+    pinned: kind === 'pinned',
     bias: biasLabel,
     color: bias === 'long' ? 'blue' : bias === 'short' ? 'amber' : 'gray',
     priceText: (e15 && e15.priceText) || (e1h && e1h.priceText) || '--',
@@ -1977,10 +2086,13 @@ function tempShortSignalFromBoard(coin) {
 
 function collectShortSignalsForRender() {
   const fixed = lastShortSignals || [];
-  const temps = listTempPairs()
-    .map((p) => tempShortSignalFromBoard(p.coin))
+  const pinned = listPinnedPairs()
+    .map((p) => extraShortSignalFromBoard(p.coin, 'pinned'))
     .filter(Boolean);
-  return [...fixed, ...temps];
+  const temps = listTempPairs()
+    .map((p) => extraShortSignalFromBoard(p.coin, 'temp'))
+    .filter(Boolean);
+  return [...fixed, ...pinned, ...temps];
 }
 
 function renderShortSignalCards() {
@@ -2003,12 +2115,17 @@ function renderShortSignalCards() {
     const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
     const ls15 = e15 && e15.lastSignal;
     const ls1h = e1h && e1h.lastSignal;
-    const tempBadge = s.temporary ? '<span class="sc-temp-badge">临时</span>' : '';
+    const kindBadge = s.temporary
+      ? '<span class="sc-temp-badge">临时</span>'
+      : s.pinned
+        ? '<span class="sc-pinned-badge">本机</span>'
+        : '';
+    const kindClass = s.temporary ? ' is-temp' : s.pinned ? ' is-pinned' : '';
     return `
-      <div class="signal-card ${sigColors[s.color] || ''}${s.temporary ? ' is-temp' : ''}">
+      <div class="signal-card ${sigColors[s.color] || ''}${kindClass}">
         <div class="sc-top">
           <div>
-            <div class="sc-name">${s.coin}${tempBadge}</div>
+            <div class="sc-name">${s.coin}${kindBadge}</div>
             <div class="sc-bias">${s.bias || ''}</div>
           </div>
           <div class="sc-px">

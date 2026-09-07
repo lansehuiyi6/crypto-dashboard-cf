@@ -467,6 +467,10 @@ body {
   letter-spacing: 0.02em;
 }
 
+.ema-section-head.ema-section-pinned {
+  color: var(--teal);
+}
+
 .ema-section-head .ema-section-note {
   font-weight: 500;
   color: var(--text-tertiary);
@@ -572,6 +576,19 @@ body {
   opacity: 0.85;
 }
 
+.ema-coin-card.is-pinned {
+  border-color: rgba(63, 185, 80, 0.4);
+  background:
+    linear-gradient(180deg, rgba(63, 185, 80, 0.07), transparent 42%),
+    var(--bg-primary);
+}
+
+.ema-coin-card.is-pinned::before {
+  background: var(--teal);
+  width: 3px;
+  opacity: 0.9;
+}
+
 .ema-coin-title-row {
   display: flex;
   align-items: center;
@@ -579,7 +596,8 @@ body {
   flex-wrap: wrap;
 }
 
-.ema-temp-badge {
+.ema-temp-badge,
+.ema-pinned-badge {
   display: inline-flex;
   align-items: center;
   font-size: 10px;
@@ -587,15 +605,57 @@ body {
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.ema-temp-badge {
   color: var(--amber);
   border: 1px solid rgba(210, 153, 34, 0.45);
   background: rgba(210, 153, 34, 0.12);
+}
+
+.ema-pinned-badge {
+  color: var(--teal);
+  border: 1px solid rgba(63, 185, 80, 0.45);
+  background: rgba(63, 185, 80, 0.12);
 }
 
 .ema-temp-ttl {
   font-size: 10px;
   color: var(--text-tertiary);
   font-weight: 500;
+}
+
+.ema-pin-btn,
+.ema-unpin-btn {
+  appearance: none;
+  border: 1px solid rgba(63, 185, 80, 0.45);
+  background: rgba(63, 185, 80, 0.12);
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.ema-pin-btn:hover,
+.ema-unpin-btn:hover {
+  background: rgba(63, 185, 80, 0.2);
+}
+
+.ema-unpin-btn {
+  margin-left: auto;
+  border-color: var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.ema-unpin-btn:hover {
+  color: var(--up);
+  border-color: rgba(248, 81, 73, 0.45);
+  background: rgba(248, 81, 73, 0.08);
 }
 
 .ema-temp-remove {
@@ -617,6 +677,23 @@ body {
   color: var(--up);
   border-color: rgba(248, 81, 73, 0.45);
   background: rgba(248, 81, 73, 0.08);
+}
+
+.signal-card.is-pinned {
+  border-color: rgba(63, 185, 80, 0.35);
+}
+
+.sc-pinned-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--teal);
+  border: 1px solid rgba(63, 185, 80, 0.45);
+  background: rgba(63, 185, 80, 0.12);
 }
 
 .ema-coin-head {
