@@ -6,7 +6,8 @@ import {
 } from './signal-engine.js';
 import { patchMajorsFromCoin } from './market-signals.js';
 import { emptyHistory, enrichWithLifecycle, EXPIRE_HOURS } from './signal-tracker.js';
-import { applyFilter, SIGNAL_TYPE_RANGES } from './filters.js';
+import { applyFilter, SIGNAL_TYPE_RANGES, summarizeSignals, stageStatsFromSignals } from './filters.js';
+import { fetchUsdtMFuturesBases, hasUsdtMFutures, toBaseSet } from './binance-futures.js';
 
 const VS_PAGE_URL = 'https://www.valuescan.io';
 
@@ -23,6 +24,7 @@ const HISTORY_BATCH = 4;
 const HISTORY_LIMIT = 50;
 const PERSIST_BATCH = 25;
 const STAGE_BATCH = 25;
+const FUTURES_BASES_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CHUNK_FAILURES = 3;
 const MAX_HISTORY_POINTS = 50;
 
@@ -295,7 +297,23 @@ export class SignalStore {
     return json(result);
   }
 
-  handleSignals(url) {
+  async getUsdtMFuturesBases() {
+    const cached = this.getValue('binance_usdt_m');
+    if (cached?.bases?.length && Date.now() - Number(cached.ts || 0) < FUTURES_BASES_TTL_MS) {
+      return toBaseSet(cached.bases);
+    }
+    try {
+      const bases = await fetchUsdtMFuturesBases();
+      this.putValue('binance_usdt_m', { bases, ts: Date.now() });
+      return toBaseSet(bases);
+    } catch (e) {
+      console.warn('[signal-store] binance futures list failed', e.message);
+      if (cached?.bases?.length) return toBaseSet(cached.bases);
+      return null;
+    }
+  }
+
+  async handleSignals(url) {
     const filter = url.searchParams.get('filter') || 'all';
     const minScore = parseInt(url.searchParams.get('minScore') || '0', 10);
     const stage = url.searchParams.get('stage') || '';
@@ -317,24 +335,36 @@ export class SignalStore {
         signals: [],
         summary: null,
         historyStats: this.getCachedStats(),
+        futuresOnly: false,
       });
     }
 
-    const rows = this.queryPublished(filter, minScore, stage, signalType);
+    const rows = this.queryPublished('all', 0, '', '');
     const signals = rows.map((r) => JSON.parse(r.payload));
     const hist = this.loadHistSlice(signals.map((s) => s.symbol));
     const vsAlertMap = this.getValue('vs_alert') || {};
     const enriched = enrichWithLifecycle(signals, vsAlertMap, hist);
-    const filtered = applyFilter(enriched, filter, minScore, stage, signalType);
+    const futuresBases = await this.getUsdtMFuturesBases();
+    const universe = futuresBases
+      ? enriched.filter((s) => hasUsdtMFutures(s.symbol, futuresBases))
+      : enriched;
+    const filtered = applyFilter(universe, filter, minScore, stage, signalType);
+    const histBase = this.getCachedStats() || {};
+    const historyStats = {
+      ...histBase,
+      stageStats: stageStatsFromSignals(universe),
+    };
 
     return json({
-      summary: meta?.summary || null,
+      summary: summarizeSignals(universe),
       signals: filtered,
-      historyStats: this.getCachedStats(),
+      historyStats,
       cached: !scanning,
       cachedAt: meta?.timestamp ? new Date(meta.timestamp).toISOString() : null,
       scanning,
       progress: scanning && job ? this.progressOf(job) : null,
+      futuresOnly: !!futuresBases,
+      futuresPairCount: futuresBases ? futuresBases.size : 0,
     });
   }
 
@@ -354,7 +384,11 @@ export class SignalStore {
       where += ` AND score >= ${range.min} AND score <= ${range.max}`;
     }
 
-    if (stage === 'emerging') {
+    if (stage === 'initial') {
+      where += " AND combined_stage = 'emerging'";
+    } else if (stage === 'active') {
+      where += " AND combined_stage = 'active'";
+    } else if (stage === 'emerging') {
       where += " AND (combined_stage IN ('emerging','reaccelerating') OR tech_stage = 'accelerating')";
     } else if (stage === 'fading') {
       where += " AND (combined_stage IN ('fading','mature') OR tech_stage IN ('fading','decelerating'))";
@@ -804,6 +838,12 @@ export class SignalStore {
       this.putValue('trending', { data: trending, timestamp: Date.now() });
     } catch (e) {
       console.warn('[signal-store] trending failed:', e.message);
+    }
+    try {
+      const bases = await fetchUsdtMFuturesBases();
+      this.putValue('binance_usdt_m', { bases, ts: Date.now() });
+    } catch (e) {
+      console.warn('[signal-store] binance futures prefetch failed', e.message);
     }
     job.failCount = 0;
     job.phase = 'publish';

@@ -2251,6 +2251,14 @@ async function loadOwnSignals(filter, stage) {
       </div>`;
     }
 
+    function clickableStageStat(num, label, stageKey, color) {
+      const active = currentStageFilter === stageKey ? 'active' : '';
+      return `<div class="signal-stat-item clickable ${active}" data-stage="${stageKey}" title="点击筛选${label}">
+        <span class="signal-stat-num" style="color:${color};">${num}</span>
+        <span class="signal-stat-label">${label}</span>
+      </div>`;
+    }
+
     // 生命周期统计
     let lifecycleStats = '';
     if (data.historyStats) {
@@ -2262,22 +2270,10 @@ async function loadOwnSignals(filter, stage) {
           <span class="signal-stat-num" style="color:#00e676;">${hs.totalTracked}</span>
           <span class="signal-stat-label">追踪中</span>
         </div>
-        <div class="signal-stat-item">
-          <span class="signal-stat-num" style="color:#00e676;">${ss.emerging || 0}</span>
-          <span class="signal-stat-label">初始阶段</span>
-        </div>
-        <div class="signal-stat-item">
-          <span class="signal-stat-num" style="color:#76ff03;">${ss.active || 0}</span>
-          <span class="signal-stat-label">活跃阶段</span>
-        </div>
-        <div class="signal-stat-item">
-          <span class="signal-stat-num" style="color:#ff9800;">${ss.fading || 0}</span>
-          <span class="signal-stat-label">衰减中</span>
-        </div>
-        <div class="signal-stat-item">
-          <span class="signal-stat-num" style="color:#ff5252;">${ss.extended || 0}</span>
-          <span class="signal-stat-label">行情扩展</span>
-        </div>
+        ${clickableStageStat(ss.emerging || 0, '初始阶段', 'initial', '#00e676')}
+        ${clickableStageStat(ss.active || 0, '活跃阶段', 'active', '#76ff03')}
+        ${clickableStageStat(ss.fading || 0, '衰减中', 'fading', '#ff9800')}
+        ${clickableStageStat(ss.extended || 0, '行情扩展', 'extended', '#ff5252')}
         <div class="signal-stat-item">
           <span class="signal-stat-num" style="color:#d500f9;">${hs.scanCount}</span>
           <span class="signal-stat-label">扫描次数</span>
@@ -2316,20 +2312,42 @@ async function loadOwnSignals(filter, stage) {
         <span class="signal-stat-label">当前显示</span>
       </div>
       ${cacheTag}
+      ${data.futuresOnly
+        ? `<span class="cache-tag live">币安U本位 ${data.futuresPairCount || ''}</span>`
+        : '<span class="cache-tag">合约列表暂不可用，未过滤</span>'}
     `;
+
+    function syncSignalTabs() {
+      const tabs = document.querySelectorAll('#signalTabs .tab-btn');
+      tabs.forEach((b) => b.classList.remove('active'));
+      if (currentStageFilter) {
+        const stageTab = document.querySelector(`#signalTabs .tab-btn[data-stage="${currentStageFilter}"]`);
+        if (stageTab) stageTab.classList.add('active');
+        return;
+      }
+      const filterTab = document.querySelector(`#signalTabs .tab-btn[data-filter="${currentSignalFilter}"]:not([data-stage])`);
+      if (filterTab) filterTab.classList.add('active');
+    }
 
     // 绑定可点击统计项事件
     summaryEl.querySelectorAll('.signal-stat-item.clickable').forEach(el => {
       el.addEventListener('click', () => {
+        if (el.dataset.stage) {
+          const stageKey = el.dataset.stage;
+          currentSignalType = '';
+          currentSignalFilter = 'all';
+          currentStageFilter = currentStageFilter === stageKey ? '' : stageKey;
+          syncSignalTabs();
+          loadOwnSignals();
+          return;
+        }
         const typeKey = el.dataset.type;
         if (currentSignalType === typeKey) {
-          // 再次点击取消筛选
           currentSignalType = '';
         } else {
           currentSignalType = typeKey;
         }
-        // 更新 active 状态
-        summaryEl.querySelectorAll('.signal-stat-item.clickable').forEach(e => e.classList.remove('active'));
+        summaryEl.querySelectorAll('.signal-stat-item.clickable[data-type]').forEach(e => e.classList.remove('active'));
         if (currentSignalType) {
           const activeEl = summaryEl.querySelector(`[data-type="${currentSignalType}"]`);
           if (activeEl) activeEl.classList.add('active');
