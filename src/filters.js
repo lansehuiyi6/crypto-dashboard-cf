@@ -15,9 +15,13 @@ export function applyFilter(allSignals, filter, minScore, stageFilter, sigType) 
     filtered = filtered.filter(s => s.scores.composite <= 45);
     filtered.sort((a, b) => a.scores.composite - b.scores.composite);
   } else if (filter === 'fomo') {
-    filtered = filtered.filter(s => s.fomo.fomo);
+    filtered = filtered.filter(s => s.fomo?.fomo);
   } else if (filter === 'fundMovement') {
-    filtered = filtered.filter(s => s.fundMovement.type !== 'none');
+    filtered = filtered.filter(s => s.fundMovement?.type && s.fundMovement.type !== 'none');
+  } else if (filter === 'fundInflow') {
+    filtered = filtered.filter(s => s.fundMovement?.type === 'bullish');
+  } else if (filter === 'fundOutflow') {
+    filtered = filtered.filter(s => s.fundMovement?.type === 'bearish');
   } else if (filter === 'reversal') {
     filtered = filtered.filter(s => s.reversal != null);
     filtered.sort((a, b) => (b.reversal?.strength || 0) - (a.reversal?.strength || 0));

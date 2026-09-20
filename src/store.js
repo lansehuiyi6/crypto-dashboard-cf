@@ -374,6 +374,8 @@ export class SignalStore {
     else if (filter === 'bearish') where += ' AND score <= 45';
     else if (filter === 'fomo') where += ' AND fomo = 1';
     else if (filter === 'fundMovement') where += " AND fund_type != 'none'";
+    else if (filter === 'fundInflow') where += " AND fund_type = 'bullish'";
+    else if (filter === 'fundOutflow') where += " AND fund_type = 'bearish'";
     else if (filter === 'reversal') where += ' AND has_reversal = 1';
     else if (filter === 'bottomReversal') where += ' AND has_bottom = 1';
 

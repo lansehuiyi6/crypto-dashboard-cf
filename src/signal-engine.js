@@ -790,6 +790,10 @@ async function generateMarketSignals(options = {}) {
     filtered = signals.filter(s => s.fomo.fomo);
   } else if (signalFilter === 'fundMovement') {
     filtered = signals.filter(s => s.fundMovement.type !== 'none');
+  } else if (signalFilter === 'fundInflow') {
+    filtered = signals.filter(s => s.fundMovement.type === 'bullish');
+  } else if (signalFilter === 'fundOutflow') {
+    filtered = signals.filter(s => s.fundMovement.type === 'bearish');
   }
 
   if (minScore > 0) {

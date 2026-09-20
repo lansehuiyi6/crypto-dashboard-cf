@@ -181,6 +181,8 @@
           <button class="tab-btn" data-filter="bearish">看跌信号</button>
           <button class="tab-btn" data-filter="fomo">FOMO</button>
           <button class="tab-btn" data-filter="fundMovement">资金异动</button>
+          <button class="tab-btn" data-filter="fundInflow">资金流入</button>
+          <button class="tab-btn" data-filter="fundOutflow">资金流出</button>
           <button class="tab-btn tab-btn-reversal" data-filter="reversal">📉 涨势反转</button>
           <button class="tab-btn tab-btn-bottom-reversal" data-filter="bottomReversal">📈 跌势反转</button>
           <span class="tab-divider"></span>
@@ -199,6 +201,8 @@
         <div class="signal-summary" id="signalSummary">
           <div class="loading">信号引擎计算中... (扫描 Top 250 代币, 约需 15-30 秒)</div>
         </div>
+
+        <div class="signal-strat-filters" id="signalStratFilters" hidden></div>
 
         <div class="signal-cards" id="signalCards">
         </div>

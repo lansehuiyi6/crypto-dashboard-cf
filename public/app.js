@@ -957,6 +957,51 @@ function hydrateBoardFromCache(board) {
   return hits;
 }
 
+const KLINE_NET_CONCURRENCY = 4;
+let klineNetInflight = 0;
+const klineNetWaiters = [];
+let klineBackoffUntil = 0;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function noteKlineRateLimit(ms = 1600) {
+  klineBackoffUntil = Math.max(klineBackoffUntil, Date.now() + ms);
+}
+
+async function withKlineNetSlot(fn) {
+  while (klineNetInflight >= KLINE_NET_CONCURRENCY) {
+    await new Promise((r) => klineNetWaiters.push(r));
+  }
+  klineNetInflight += 1;
+  try {
+    const wait = klineBackoffUntil - Date.now();
+    if (wait > 0) await sleep(wait);
+    return await fn();
+  } finally {
+    klineNetInflight -= 1;
+    const next = klineNetWaiters.shift();
+    if (next) next();
+  }
+}
+
+async function mapPoolClient(items, concurrency, fn) {
+  const list = Array.isArray(items) ? items : [];
+  const results = new Array(list.length);
+  if (!list.length) return results;
+  let next = 0;
+  async function worker() {
+    while (next < list.length) {
+      const idx = next++;
+      results[idx] = await fn(list[idx], idx);
+    }
+  }
+  const n = Math.min(Math.max(1, concurrency), Math.max(1, list.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
+}
+
 async function fetchKlinesClient(symbol, interval, limit = KLINE_LIMIT) {
   const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
   const lim = Math.max(Number(limit) || KLINE_LIMIT, 100);
@@ -965,17 +1010,30 @@ async function fetchKlinesClient(symbol, interval, limit = KLINE_LIMIT) {
     (s) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${interval}&limit=${lim}`,
     (s) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${interval}&limit=${lim}`,
   ];
+  let lastErr = null;
   for (const sym of aliases) {
     for (const make of hosts) {
       try {
-        const res = await fetch(make(sym));
-        if (!res.ok) continue;
+        const res = await fetch(make(sym), { signal: AbortSignal.timeout(8000) });
+        if (res.status === 429 || res.status === 418) {
+          noteKlineRateLimit();
+          lastErr = new Error('klines 429');
+          await sleep(1600);
+          continue;
+        }
+        if (!res.ok) {
+          lastErr = new Error('klines ' + res.status);
+          continue;
+        }
         const data = await res.json();
         if (Array.isArray(data) && data.length >= 80) return data;
-      } catch { /* next host */ }
+        lastErr = new Error('klines short');
+      } catch (e) {
+        lastErr = e;
+      }
     }
   }
-  throw new Error('klines ' + symbol);
+  throw lastErr || new Error('klines ' + symbol);
 }
 
 async function getKlinesCached(symbol, interval, force, limit = KLINE_LIMIT) {
@@ -984,7 +1042,7 @@ async function getKlinesCached(symbol, interval, force, limit = KLINE_LIMIT) {
     const hit = lsGet(key, klineFreshMs(interval));
     if (hit) return hit;
   }
-  const klines = await fetchKlinesClient(symbol, interval, limit);
+  const klines = await withKlineNetSlot(() => fetchKlinesClient(symbol, interval, limit));
   lsSet(key, klines);
   return klines;
 }
@@ -2173,7 +2231,14 @@ async function loadMarketSignals() {
 let currentSignalFilter = 'all';
 let currentStageFilter = '';
 let currentSignalType = ''; // 强烈买入/建议买入/值得关注等点击筛选
+let currentStrategyDir = ''; // 15m_long | 15m_short | 1h_long | 1h_short | resonance | watch
 let lastSignalData = null;
+const SIGNAL_STRAT_BULL_N = 25;
+const SIGNAL_STRAT_BEAR_N = 25;
+const signalStrategyByKey = new Map();
+const signalBinanceSymbol = new Map();
+const expandedSignalKeys = new Set();
+let strategyLoadGen = 0;
 
 // 信号类型 -> 评分范围映射
 const SIGNAL_TYPE_RANGES = {
@@ -2184,6 +2249,419 @@ const SIGNAL_TYPE_RANGES = {
   caution:   { min: 35, max: 44 },
   riskAlert: { min: 0,  max: 34 },
 };
+
+function signalCacheKey(sig) {
+  return String(sig?.id || sig?.symbol || '').toLowerCase();
+}
+
+function signalCoin(sig) {
+  return String(sig?.symbol || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function signalSymbolCandidates(coin) {
+  const b = String(coin || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!b) return [];
+  const out = [];
+  const add = (s) => { if (s && !out.includes(s)) out.push(s); };
+  const map = getStrategySymbolMap();
+  if (map[b]) add(map[b]);
+  add(b + 'USDT');
+  if (!b.startsWith('1000') && !b.startsWith('1M')) {
+    add('1000' + b + 'USDT');
+    add('10000' + b + 'USDT');
+    add('1M' + b + 'USDT');
+    add('1000000' + b + 'USDT');
+  }
+  return out;
+}
+
+function overlayFromBoard(coin) {
+  const k = stratKeyFromCoin(coin);
+  const board = lastEmaBoard;
+  if (!board) return null;
+  const r15 = board['15m'] && board['15m'][k];
+  const r1h = board['1h'] && board['1h'][k];
+  if (!r15 && !r1h) return null;
+  const map = getStrategySymbolMap();
+  return {
+    symbol: map[k] || (k + 'USDT'),
+    r15: r15 || null,
+    r1h: r1h || null,
+    r4h: board['4h'] && board['4h'][k],
+    r1d: board['1d'] && board['1d'][k],
+    adx4h: board.adx4h && board.adx4h[k],
+    detailsReady: !!(board['4h'] && board['4h'][k]),
+  };
+}
+
+function pickAutoloadSignals(signals) {
+  const list = Array.isArray(signals) ? signals : [];
+  if (list.length <= SIGNAL_STRAT_BULL_N) return list.slice();
+  const bull = list
+    .filter((s) => (s.scores?.composite ?? 0) >= 55)
+    .sort((a, b) => (b.scores?.composite || 0) - (a.scores?.composite || 0))
+    .slice(0, SIGNAL_STRAT_BULL_N);
+  const bear = list
+    .filter((s) => (s.scores?.composite ?? 0) <= 45)
+    .sort((a, b) => (a.scores?.composite || 0) - (b.scores?.composite || 0))
+    .slice(0, SIGNAL_STRAT_BEAR_N);
+  const seen = new Set();
+  const out = [];
+  for (const s of [...bull, ...bear]) {
+    const k = signalCacheKey(s);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
+}
+
+function strategyDirOf(entry) {
+  const d15 = combinedDir(entry && entry.r15);
+  const d1h = combinedDir(entry && entry.r1h);
+  return { d15, d1h, resonance: d15 === d1h && d15 !== 'watch' };
+}
+
+function matchesStrategyDir(entry, dirFilter) {
+  if (!dirFilter) return true;
+  if (!entry || entry.status !== 'ready') return false;
+  const { d15, d1h, resonance } = strategyDirOf(entry);
+  if (dirFilter === '15m_long') return d15 === 'long';
+  if (dirFilter === '15m_short') return d15 === 'short';
+  if (dirFilter === '1h_long') return d1h === 'long';
+  if (dirFilter === '1h_short') return d1h === 'short';
+  if (dirFilter === 'resonance') return resonance;
+  if (dirFilter === 'watch') return d15 === 'watch' && d1h === 'watch';
+  return true;
+}
+
+function findSignalByKey(key) {
+  const list = lastSignalData?.signals || [];
+  return list.find((s) => signalCacheKey(s) === key) || null;
+}
+
+function enrichSignalOverlay(entry) {
+  if (!entry) return;
+  if (entry.r15 && entry.r15.macdKdj) {
+    entry.r15.macdKdjView = annotateMacdKdjContext(entry.r15.macdKdj, entry.r4h, entry.r1d);
+  }
+  if (entry.r1h && entry.r1h.macdKdj) {
+    entry.r1h.macdKdjView = annotateMacdKdjContext(entry.r1h.macdKdj, entry.r4h, entry.r1d);
+  }
+  if (entry.r15 && entry.r15.keltner) {
+    entry.r15.keltner = annotateKeltnerWithHtfAdx(entry.r15.keltner, {
+      filterAdx: entry.r1h && entry.r1h.adx,
+      filterTf: '1h',
+      bgAdx: entry.adx4h,
+      bgTf: '4h',
+      localAdx: entry.r15.adx,
+      localTf: '15m',
+    });
+  }
+  if (entry.r1h && entry.r1h.keltner) {
+    entry.r1h.keltner = annotateKeltnerWithHtfAdx(entry.r1h.keltner, {
+      filterAdx: entry.adx4h || (entry.r1h && entry.r1h.adx),
+      filterTf: entry.adx4h ? '4h' : '1h',
+      bgAdx: null,
+      bgTf: null,
+      localAdx: entry.r1h.adx,
+      localTf: '1h',
+    });
+  }
+}
+
+async function loadSignalStrategyCompact(sig) {
+  const coin = signalCoin(sig);
+  const fromBoard = overlayFromBoard(coin);
+  if (fromBoard && fromBoard.r15 && fromBoard.r1h) {
+    if (fromBoard.symbol) signalBinanceSymbol.set(coin, fromBoard.symbol);
+    return fromBoard;
+  }
+
+  let symbol = signalBinanceSymbol.get(coin);
+  if (symbol === '') throw new Error('no binance pair');
+
+  let r15 = fromBoard && fromBoard.r15;
+  if (!symbol) {
+    for (const cand of signalSymbolCandidates(coin)) {
+      try {
+        const k15 = await getKlinesCached(cand, '15m', false);
+        r15 = rowFromKlines(k15, coin, '15m');
+        if (r15) {
+          symbol = cand;
+          signalBinanceSymbol.set(coin, cand);
+          break;
+        }
+      } catch { /* next alias / host */ }
+    }
+  } else if (!r15) {
+    const k15 = await getKlinesCached(symbol, '15m', false);
+    r15 = rowFromKlines(k15, coin, '15m');
+  }
+
+  if (!symbol) {
+    signalBinanceSymbol.set(coin, '');
+    throw new Error('no binance pair');
+  }
+
+  let r1h = fromBoard && fromBoard.r1h;
+  if (!r1h) {
+    const k1h = await getKlinesCached(symbol, '1h', false);
+    r1h = rowFromKlines(k1h, coin, '1h');
+  }
+  if (!r15 && !r1h) throw new Error('指标不足');
+  return { symbol, r15, r1h, r4h: fromBoard && fromBoard.r4h, r1d: fromBoard && fromBoard.r1d, adx4h: fromBoard && fromBoard.adx4h, detailsReady: !!(fromBoard && fromBoard.detailsReady) };
+}
+
+async function loadSignalStrategyDetails(entry) {
+  if (!entry || entry.detailsReady) return;
+  if (entry.detailsPromise) return entry.detailsPromise;
+  entry.detailsPromise = (async () => {
+    const symbol = entry.symbol;
+    const coin = entry.coin;
+    if (!symbol) throw new Error('no symbol');
+    try {
+      const k4h = await getKlinesCached(symbol, '4h', false, 140);
+      entry.r4h = macdKdjFromKlines(k4h, coin, '4h');
+      const adx = evaluateAdx(k4h, { interval: '4h' });
+      if (adx) entry.adx4h = adx;
+    } catch { /* 4h 可选 */ }
+    try {
+      const k1d = await getKlinesCached(symbol, '1d', false, 120);
+      entry.r1d = macdKdjFromKlines(k1d, coin, '1d');
+    } catch { /* 1d 可选 */ }
+    enrichSignalOverlay(entry);
+    entry.detailsReady = true;
+  })();
+  try {
+    await entry.detailsPromise;
+  } finally {
+    entry.detailsPromise = null;
+  }
+}
+
+function ensureSignalStrategy(sig, opts = {}) {
+  const key = signalCacheKey(sig);
+  let entry = signalStrategyByKey.get(key);
+  if (!entry || entry.status === 'idle' || (entry.status === 'error' && opts.retry)) {
+    entry = {
+      status: 'loading',
+      key,
+      coin: signalCoin(sig),
+      promise: null,
+    };
+    signalStrategyByKey.set(key, entry);
+    entry.promise = loadSignalStrategyCompact(sig).then((loaded) => {
+      Object.assign(entry, loaded, { status: 'ready' });
+      if (entry.r4h || entry.r1d) enrichSignalOverlay(entry);
+      return entry;
+    }).catch((e) => {
+      entry.status = 'error';
+      entry.error = e.message || 'load failed';
+      return entry;
+    });
+  }
+  const wait = entry.promise || Promise.resolve(entry);
+  return wait.then(async (ent) => {
+    if (opts.details && ent.status === 'ready') await loadSignalStrategyDetails(ent);
+    return ent;
+  });
+}
+
+function renderSignalStrategyDetails(entry) {
+  if (!entry || entry.status !== 'ready') return '';
+  if (!entry.detailsReady) {
+    return '<div class="sig-strat-details"><div class="loading">加载策略详情…</div></div>';
+  }
+  const board = { '4h': {}, '1d': {} };
+  if (entry.r4h) board['4h'][entry.coin] = entry.r4h;
+  if (entry.r1d) board['1d'][entry.coin] = entry.r1d;
+  return `<div class="sig-strat-details">
+    ${macdKdjBgHtml(board, entry.coin)}
+    <div class="ema-tf-cols">
+      ${renderEmaTfCol('15m', entry.r15)}
+      ${renderEmaTfCol('1h', entry.r1h)}
+    </div>
+  </div>`;
+}
+
+function renderSignalStrategyStrip(sig, entry, expanded) {
+  const key = signalCacheKey(sig);
+  if (!entry || entry.status === 'loading') {
+    return `<div class="sig-strat" data-sig-key="${escAttr(key)}">
+      <span class="sig-strat-kicker">开单确认</span>
+      <span class="ema-muted">${entry && entry.status === 'loading' ? '加载 15m/1h…' : '排队加载…'}</span>
+    </div>`;
+  }
+  if (entry.status === 'idle') {
+    return `<div class="sig-strat" data-sig-key="${escAttr(key)}">
+      <span class="sig-strat-kicker">开单确认</span>
+      <button type="button" class="sig-strat-load" data-sig-load="${escAttr(key)}">点击加载</button>
+      <span class="ema-muted">未自动加载（看涨/看跌各前 ${SIGNAL_STRAT_BULL_N}）</span>
+    </div>`;
+  }
+  if (entry.status === 'error') {
+    return `<div class="sig-strat" data-sig-key="${escAttr(key)}">
+      <span class="sig-strat-kicker">开单确认</span>
+      <span class="ema-muted">未拿到 K 线</span>
+      <button type="button" class="sig-strat-load" data-sig-load="${escAttr(key)}">重试</button>
+    </div>`;
+  }
+  const { resonance } = strategyDirOf(entry);
+  return `<div class="sig-strat ${expanded ? 'is-open' : ''}" data-sig-key="${escAttr(key)}">
+    <button type="button" class="sig-strat-toggle" data-sig-expand="${escAttr(key)}" aria-expanded="${expanded ? 'true' : 'false'}">
+      <span class="sig-strat-kicker">开单确认</span>
+      <span class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(entry.r15)}</span>
+      <span class="ema-summary-item"><span class="ema-tf">1h</span>${combinedHtml(entry.r1h)}</span>
+      ${resonance ? '<span class="strategy-tag long">共振</span>' : ''}
+      <span class="sig-strat-caret">${expanded ? '收起详情' : '详情'}</span>
+    </button>
+    ${expanded ? renderSignalStrategyDetails(entry) : ''}
+  </div>`;
+}
+
+function patchSignalStrategyStrip(key) {
+  const card = document.querySelector(`.signal-card-item[data-sig-key="${CSS.escape(key)}"]`);
+  if (!card) return;
+  const mount = card.querySelector('.sig-strat-mount');
+  if (!mount) return;
+  const sig = findSignalByKey(key);
+  if (!sig) return;
+  mount.innerHTML = renderSignalStrategyStrip(sig, signalStrategyByKey.get(key), expandedSignalKeys.has(key));
+}
+
+function visibleOwnSignals() {
+  const list = lastSignalData?.signals || [];
+  if (!currentStrategyDir) return list;
+  return list.filter((s) => matchesStrategyDir(signalStrategyByKey.get(signalCacheKey(s)), currentStrategyDir));
+}
+
+function renderSignalCardsList() {
+  const cardsEl = document.getElementById('signalCards');
+  if (!cardsEl || !lastSignalData) return;
+  const list = visibleOwnSignals();
+  if (!list.length) {
+    cardsEl.innerHTML = currentStrategyDir
+      ? '<div class="empty">该开单方向下暂无已加载信号。默认只自动加载看涨/看跌各前 25；可点卡片「点击加载」，或再点一次该筛选看全部已加载结果。</div>'
+      : '<div class="empty">该筛选条件下暂无信号</div>';
+    return;
+  }
+  cardsEl.innerHTML = list.map((sig) => renderSignalCard(sig)).join('');
+}
+
+function strategyFilterCounts(signals) {
+  const counts = {
+    '15m_long': 0, '15m_short': 0, '1h_long': 0, '1h_short': 0, resonance: 0, watch: 0, ready: 0, loading: 0, idle: 0, error: 0,
+  };
+  for (const sig of signals || []) {
+    const entry = signalStrategyByKey.get(signalCacheKey(sig));
+    if (!entry || entry.status === 'idle') { counts.idle += 1; continue; }
+    if (entry.status === 'loading') { counts.loading += 1; continue; }
+    if (entry.status !== 'ready') { counts.error += 1; continue; }
+    counts.ready += 1;
+    const { d15, d1h, resonance } = strategyDirOf(entry);
+    if (d15 === 'long') counts['15m_long'] += 1;
+    if (d15 === 'short') counts['15m_short'] += 1;
+    if (d1h === 'long') counts['1h_long'] += 1;
+    if (d1h === 'short') counts['1h_short'] += 1;
+    if (resonance) counts.resonance += 1;
+    if (d15 === 'watch' && d1h === 'watch') counts.watch += 1;
+  }
+  return counts;
+}
+
+function updateStrategyFilterBar() {
+  const el = document.getElementById('signalStratFilters');
+  if (!el || !lastSignalData) return;
+  const signals = lastSignalData.signals || [];
+  if (!signals.length) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  el.hidden = false;
+  const c = strategyFilterCounts(signals);
+  const chip = (key, label, num) => {
+    const active = currentStrategyDir === key ? 'active' : '';
+    return `<button type="button" class="tab-btn ${active}" data-strat-dir="${key}">${label} ${num}</button>`;
+  };
+  el.innerHTML = `
+    <div class="sig-strat-bar-head">
+      <span class="sig-strat-kicker">开单过滤</span>
+      <span class="ema-muted">已加载 ${c.ready}/${signals.length} · 默认看涨/看跌各前 ${SIGNAL_STRAT_BULL_N} · 点方向筛选会补齐当前列表 · 15m+1h · 点卡片展开详情</span>
+    </div>
+    <div class="sig-strat-chips">
+      ${chip('15m_long', '15m 多', c['15m_long'])}
+      ${chip('15m_short', '15m 空', c['15m_short'])}
+      ${chip('1h_long', '1h 多', c['1h_long'])}
+      ${chip('1h_short', '1h 空', c['1h_short'])}
+      ${chip('resonance', '共振', c.resonance)}
+      ${chip('watch', '观望', c.watch)}
+    </div>`;
+}
+
+function afterStrategyEntryUpdate(key) {
+  if (currentStrategyDir) renderSignalCardsList();
+  else patchSignalStrategyStrip(key);
+  updateStrategyFilterBar();
+}
+
+async function loadStrategiesForSignals(signals, gen, onlyAutoload) {
+  const list = Array.isArray(signals) ? signals : [];
+  const targets = onlyAutoload ? pickAutoloadSignals(list) : list;
+  const targetKeys = new Set(targets.map(signalCacheKey));
+  for (const sig of list) {
+    const key = signalCacheKey(sig);
+    if (!key) continue;
+    const cur = signalStrategyByKey.get(key);
+    if (!targetKeys.has(key) && !cur) {
+      signalStrategyByKey.set(key, { status: 'idle', key, coin: signalCoin(sig) });
+    }
+  }
+  renderSignalCardsList();
+  updateStrategyFilterBar();
+  await mapPoolClient(targets, 6, async (sig) => {
+    if (gen !== strategyLoadGen) return;
+    const key = signalCacheKey(sig);
+    await ensureSignalStrategy(sig);
+    if (gen !== strategyLoadGen) return;
+    afterStrategyEntryUpdate(key);
+  });
+  if (gen === strategyLoadGen) updateStrategyFilterBar();
+}
+
+async function toggleSignalStrategyDetails(key) {
+  if (expandedSignalKeys.has(key)) {
+    expandedSignalKeys.delete(key);
+    patchSignalStrategyStrip(key);
+    return;
+  }
+  expandedSignalKeys.add(key);
+  patchSignalStrategyStrip(key);
+  const sig = findSignalByKey(key);
+  if (!sig) return;
+  await ensureSignalStrategy(sig, { details: true, retry: true });
+  patchSignalStrategyStrip(key);
+}
+
+async function loadOneSignalStrategy(key, retry) {
+  const sig = findSignalByKey(key);
+  if (!sig) return;
+  const entry = signalStrategyByKey.get(key);
+  if (entry) entry.status = 'loading';
+  patchSignalStrategyStrip(key);
+  await ensureSignalStrategy(sig, { retry: !!retry });
+  afterStrategyEntryUpdate(key);
+}
+
+async function onStrategyDirClick(dirKey) {
+  currentStrategyDir = currentStrategyDir === dirKey ? '' : dirKey;
+  renderSignalCardsList();
+  updateStrategyFilterBar();
+  if (!currentStrategyDir || !lastSignalData?.signals?.length) return;
+  const gen = strategyLoadGen;
+  await loadStrategiesForSignals(lastSignalData.signals, gen, false);
+}
 
 // 折叠按钮
 document.getElementById('collapseBtn').addEventListener('click', () => {
@@ -2259,6 +2737,14 @@ async function loadOwnSignals(filter, stage) {
       </div>`;
     }
 
+    function clickableFilterStat(num, label, filterKey, color) {
+      const active = currentSignalFilter === filterKey && !currentStageFilter && !currentSignalType ? 'active' : '';
+      return `<div class="signal-stat-item clickable ${active}" data-filter="${filterKey}" title="点击筛选${label}">
+        <span class="signal-stat-num" style="color:${color};">${num}</span>
+        <span class="signal-stat-label">${label}</span>
+      </div>`;
+    }
+
     // 生命周期统计
     let lifecycleStats = '';
     if (data.historyStats) {
@@ -2289,18 +2775,9 @@ async function loadOwnSignals(filter, stage) {
       ${clickableStat(s.caution, '谨慎', 'caution', '#ff9800')}
       ${clickableStat(s.riskAlert, '风险预警', 'riskAlert', '#ff5252')}
       <div class="signal-stat-divider"></div>
-      <div class="signal-stat-item">
-        <span class="signal-stat-num" style="color:#e040fb;">${s.fomoCount}</span>
-        <span class="signal-stat-label">FOMO</span>
-      </div>
-      <div class="signal-stat-item">
-        <span class="signal-stat-num" style="color:#00e676;">${s.fundMovementBullish}</span>
-        <span class="signal-stat-label">资金流入</span>
-      </div>
-      <div class="signal-stat-item">
-        <span class="signal-stat-num" style="color:#ff5252;">${s.fundMovementBearish}</span>
-        <span class="signal-stat-label">资金流出</span>
-      </div>
+      ${clickableFilterStat(s.fomoCount, 'FOMO', 'fomo', '#e040fb')}
+      ${clickableFilterStat(s.fundMovementBullish, '资金流入', 'fundInflow', '#00e676')}
+      ${clickableFilterStat(s.fundMovementBearish, '资金流出', 'fundOutflow', '#ff5252')}
       ${lifecycleStats}
       <div class="signal-stat-divider"></div>
       <div class="signal-stat-item">
@@ -2336,7 +2813,18 @@ async function loadOwnSignals(filter, stage) {
           const stageKey = el.dataset.stage;
           currentSignalType = '';
           currentSignalFilter = 'all';
+          currentStrategyDir = '';
           currentStageFilter = currentStageFilter === stageKey ? '' : stageKey;
+          syncSignalTabs();
+          loadOwnSignals();
+          return;
+        }
+        if (el.dataset.filter) {
+          const filterKey = el.dataset.filter;
+          currentSignalType = '';
+          currentStageFilter = '';
+          currentStrategyDir = '';
+          currentSignalFilter = currentSignalFilter === filterKey ? 'all' : filterKey;
           syncSignalTabs();
           loadOwnSignals();
           return;
@@ -2356,13 +2844,13 @@ async function loadOwnSignals(filter, stage) {
       });
     });
 
-    // 渲染信号卡片
-    if (!data.signals.length) {
-      cardsEl.innerHTML = '<div class="empty">该筛选条件下暂无信号</div>';
-      return;
-    }
-
-    cardsEl.innerHTML = data.signals.map(sig => renderSignalCard(sig)).join('');
+    strategyLoadGen += 1;
+    const gen = strategyLoadGen;
+    renderSignalCardsList();
+    updateStrategyFilterBar();
+    loadStrategiesForSignals(data.signals || [], gen, !currentStrategyDir).catch((e) => {
+      console.warn('strategy overlay', e.message || e);
+    });
   } catch (e) {
     console.warn('Signal engine fetch failed:', e.message);
     summaryEl.innerHTML = `<div class="empty">信号引擎加载失败: ${e.message}</div>`;
@@ -2466,14 +2954,17 @@ function renderSignalCard(sig) {
   const bearPct = Math.round(bb.bearish * 100);
 
   const href = `https://www.coingecko.com/en/coins/${sig.id}`;
+  const key = signalCacheKey(sig);
+  const stratEntry = signalStrategyByKey.get(key);
+  const expanded = expandedSignalKeys.has(key);
 
   return `
-    <a href="${href}" target="_blank" class="signal-card-item" style="border-left-color:${scoreColor};">
+    <article class="signal-card-item" data-sig-key="${escAttr(key)}" style="border-left-color:${scoreColor};">
       <div class="signal-card-top">
         <div class="signal-card-id">
           ${sig.image ? `<img class="signal-token-icon" src="${sig.image}" alt="" onerror="this.style.display='none'">` : ''}
           <div>
-            <div class="signal-token-symbol">${sig.symbol || '?'}</div>
+            <a class="signal-token-symbol" href="${href}" target="_blank" rel="noopener">${sig.symbol || '?'}</a>
             <div class="signal-token-name">${sig.name || ''}</div>
           </div>
         </div>
@@ -2522,19 +3013,43 @@ function renderSignalCard(sig) {
         <div class="signal-badges">${fomoBadge}${fmBadge}</div>
         <div class="signal-vol-info">24h量 ${fmtUsd(sig.volume24h)}</div>
       </div>
-    </a>`;
+      <div class="sig-strat-mount">${renderSignalStrategyStrip(sig, stratEntry, expanded)}</div>
+    </article>`;
 }
 
 // Tab 切换
 document.getElementById('signalTabs').addEventListener('click', (e) => {
   const btn = e.target.closest('.tab-btn');
   if (!btn) return;
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('#signalTabs .tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   const filter = btn.dataset.filter || 'all';
   const stage = btn.dataset.stage || '';
-  currentSignalType = ''; // 切换Tab时清除信号类型筛选
+  currentSignalType = '';
+  currentStrategyDir = '';
   loadOwnSignals(filter, stage);
+});
+
+document.getElementById('signalStratFilters').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-strat-dir]');
+  if (!btn) return;
+  onStrategyDirClick(btn.dataset.stratDir);
+});
+
+document.getElementById('signalCards').addEventListener('click', (e) => {
+  const loadBtn = e.target.closest('[data-sig-load]');
+  if (loadBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    loadOneSignalStrategy(loadBtn.dataset.sigLoad, true);
+    return;
+  }
+  const exp = e.target.closest('[data-sig-expand]');
+  if (exp) {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleSignalStrategyDetails(exp.dataset.sigExpand);
+  }
 });
 
 function updateTimestamp() {
