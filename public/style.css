@@ -976,6 +976,105 @@ body {
   margin-bottom: 0;
 }
 
+.scalp-board {
+  margin: 0 0 16px;
+  padding: 16px 18px 18px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+}
+
+.scalp-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.scalp-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--text-tertiary);
+  min-width: 0;
+}
+
+.scalp-card.accent-long { border-left-color: var(--teal); }
+.scalp-card.accent-short { border-left-color: var(--up); }
+.scalp-card.is-open { border-color: rgba(88, 166, 255, 0.28); }
+
+.scalp-toggle {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  padding: 12px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.scalp-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.scalp-coin {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.scalp-px {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.scalp-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.scalp-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.scalp-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.scalp-detail {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.scalp-levels {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scalp-cvd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .short-term-stack {
   display: flex;
   flex-direction: column;
@@ -2388,6 +2487,7 @@ a.signal-token-symbol:hover {
 
 @media (max-width: 1100px) {
   .main-grid { grid-template-columns: 1fr 1fr; }
+  .scalp-cards { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 900px) {
@@ -2395,6 +2495,7 @@ a.signal-token-symbol:hover {
   .main-grid, .lower-grid, .short-grid, .sc-tf-grid, .sc-sr { grid-template-columns: 1fr; }
   .signal-cards { grid-template-columns: 1fr; }
   .ema-cards { grid-template-columns: 1fr; }
+  .scalp-cards { grid-template-columns: 1fr; }
   .ema-coin-head {
     flex-direction: column;
     align-items: stretch;

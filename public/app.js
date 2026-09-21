@@ -11,6 +11,7 @@ import {
   EXEC_INTERVALS,
   HTF_INTERVALS,
 } from './ema-core.js';
+import { SCALP_SYMBOLS, evaluateScalp } from './scalp-core.js';
 
 const KLINE_LIMIT = 160;
 
@@ -844,6 +845,7 @@ function initEmaNotifyUi() {
 }
 
 function klineFreshMs(interval) {
+  if (interval === '1m') return 15 * 1000;
   if (interval === '15m') return 90 * 1000;
   if (interval === '1h') return 4 * 60 * 1000;
   if (interval === '4h') return 20 * 60 * 1000;
@@ -1845,6 +1847,254 @@ async function loadEmaStrategy(force = false) {
 
   await usdtPromise;
 }
+
+// ============================================================
+//  超短线方向单（价 + OI + 资金费 + 1m CVD/针）
+// ============================================================
+
+const LS_SCALP_META = 'cd:sc:';
+const SCALP_META_MS = 70 * 1000;
+const SCALP_DEPTH_MS = 12 * 1000;
+let lastScalpViews = {};
+const expandedScalpCoins = new Set();
+const scalpDepthMem = new Map();
+
+function scalpBias15(coin) {
+  const row = lastEmaBoard && lastEmaBoard['15m'] && lastEmaBoard['15m'][coin];
+  return combinedDir(row);
+}
+
+function fmtNotional(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '--';
+  if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return '$' + (v / 1e3).toFixed(0) + 'K';
+  return '$' + v.toFixed(0);
+}
+
+function fmtFundingRate(rate) {
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return '--';
+  return (n * 100).toFixed(4) + '%';
+}
+
+function fundingCountdown(ts) {
+  const t = Number(ts);
+  if (!Number.isFinite(t) || t <= 0) return '';
+  const ms = t - Date.now();
+  if (ms <= 0) return '即将结算';
+  const m = Math.round(ms / 60000);
+  if (m >= 60) return Math.floor(m / 60) + 'h' + (m % 60) + 'm';
+  return m + 'm';
+}
+
+function signedPct(n, digits = 2) {
+  if (!Number.isFinite(n)) return '--';
+  const sign = n > 0 ? '+' : '';
+  return sign + n.toFixed(digits) + '%';
+}
+
+async function fetchFapiJson(path) {
+  const url = 'https://fapi.binance.com' + path;
+  return withKlineNetSlot(async () => {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (res.status === 429 || res.status === 418) {
+      noteKlineRateLimit();
+      throw new Error('fapi 429');
+    }
+    if (!res.ok) throw new Error('fapi ' + res.status);
+    return res.json();
+  });
+}
+
+async function fetchScalpKlines(symbol, force = false) {
+  const key = LS_KLINE + symbol + ':1m';
+  if (!force) {
+    const hit = lsGet(key, klineFreshMs('1m'));
+    if (hit) return hit;
+  }
+  const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
+  const lim = 90;
+  const klines = await withKlineNetSlot(async () => {
+    let lastErr = null;
+    for (const sym of aliases) {
+      const urls = [
+        `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1m&limit=${lim}`,
+        `https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=1m&limit=${lim}`,
+        `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1m&limit=${lim}`,
+      ];
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+          if (res.status === 429 || res.status === 418) {
+            noteKlineRateLimit();
+            lastErr = new Error('klines 429');
+            await sleep(1600);
+            continue;
+          }
+          if (!res.ok) { lastErr = new Error('klines ' + res.status); continue; }
+          const data = await res.json();
+          if (Array.isArray(data) && data.length >= 40) return data;
+          lastErr = new Error('klines short');
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+    }
+    throw lastErr || new Error('1m ' + symbol);
+  });
+  lsSet(key, klines);
+  return klines;
+}
+
+async function fetchScalpMeta(symbol, force = false) {
+  const key = LS_SCALP_META + symbol;
+  if (!force) {
+    const hit = lsGet(key, SCALP_META_MS);
+    if (hit) return hit;
+  }
+  const [prem, oiHist] = await Promise.all([
+    fetchFapiJson(`/fapi/v1/premiumIndex?symbol=${symbol}`),
+    fetchFapiJson(`/futures/data/openInterestHist?symbol=${symbol}&period=5m&limit=24`),
+  ]);
+  const lastOi = Array.isArray(oiHist) && oiHist.length
+    ? Number(oiHist[oiHist.length - 1].sumOpenInterest)
+    : null;
+  const meta = {
+    fundingRate: Number(prem && prem.lastFundingRate),
+    nextFundingTime: Number(prem && prem.nextFundingTime),
+    markPrice: Number(prem && prem.markPrice),
+    oiHist: Array.isArray(oiHist) ? oiHist : [],
+    oiNow: lastOi,
+  };
+  lsSet(key, meta);
+  return meta;
+}
+
+async function fetchScalpDepth(symbol, force = false) {
+  const now = Date.now();
+  const mem = scalpDepthMem.get(symbol);
+  if (!force && mem && now - mem.ts < SCALP_DEPTH_MS) return mem.data;
+  const data = await fetchFapiJson(`/fapi/v1/depth?symbol=${symbol}&limit=10`);
+  scalpDepthMem.set(symbol, { ts: now, data });
+  return data;
+}
+
+function renderScalpCard(view) {
+  const coin = view.coin;
+  const open = expandedScalpCoins.has(coin);
+  const q = view.quad || {};
+  const act = view.action || {};
+  const play = act.play || {};
+  const depth = view.depth || {};
+  const biasCls = view.bias15 === 'long' ? 'long' : view.bias15 === 'short' ? 'short' : 'watch';
+  const biasLab = view.bias15 === 'long' ? '15m 偏多' : view.bias15 === 'short' ? '15m 偏空' : '15m 走平';
+  const spark = sparklineSvg(view.cvdSpark, act.cls === 'short' ? 'down' : 'up');
+  const stop = Number.isFinite(play.stop) ? fmtPrice(play.stop) : '';
+  const target = Number.isFinite(play.target) ? fmtPrice(play.target) : '';
+  const fundAnn = Number.isFinite(view.fundingAnn) ? view.fundingAnn.toFixed(0) + '%' : '--';
+  const spread = Number.isFinite(depth.spreadBps) ? depth.spreadBps.toFixed(2) + 'bp' : '--';
+  const detail = open ? `
+    <div class="scalp-detail">
+      <div class="ema-hint">${q.hint || ''}</div>
+      <div class="ema-hint">${act.hint || play.reason || ''}</div>
+      ${stop || target ? `<div class="scalp-levels">止损外侧 ${stop || '--'} · 目标 ${target || '--'} <span class="ema-muted">（参考，须条件单）</span></div>` : ''}
+      <div class="scalp-cvd"><span class="ema-muted">CVD</span>${spark}</div>
+      <div class="ema-muted">点差 ${spread} · 买5 ${fmtNotional(depth.bidNotional)} / 卖5 ${fmtNotional(depth.askNotional)} · 下期资金费 ${fundingCountdown(view.nextFundingTime)}</div>
+      <div class="ema-muted">清算带为 1m 长针近似，不是热力图。U 本位逐仓；BTC/ETH 5–10x 封顶；单笔 0.3%–0.5% 账户风险。</div>
+    </div>` : '';
+  return `<article class="scalp-card accent-${act.cls || 'watch'}${open ? ' is-open' : ''}" data-scalp-coin="${escAttr(coin)}">
+    <button type="button" class="scalp-toggle" data-scalp-expand="${escAttr(coin)}" aria-expanded="${open ? 'true' : 'false'}">
+      <div class="scalp-head">
+        <div>
+          <div class="scalp-coin">${coin}</div>
+          <div class="scalp-px">${fmtPrice(view.price)}</div>
+        </div>
+        <div class="scalp-tags">
+          <span class="strategy-tag ${biasCls}">${biasLab}</span>
+          <span class="strategy-tag ${q.cls || 'watch'}">${q.tag || '--'}</span>
+        </div>
+      </div>
+      <div class="scalp-metrics">
+        <span>价 ${signedPct(view.pricePct)}</span>
+        <span>OI ${signedPct(view.oiPct)}</span>
+        <span>费率 ${fmtFundingRate(view.fundingRate)} <span class="ema-muted">年化 ${fundAnn}</span></span>
+      </div>
+      <div class="scalp-action">
+        <span class="strategy-tag ${act.cls || 'watch'}">${act.label || '观望'}</span>
+        <span class="sig-strat-caret">${open ? '收起' : '详情'}</span>
+      </div>
+    </button>
+    ${detail}
+  </article>`;
+}
+
+function renderScalpBoard() {
+  const box = document.getElementById('scalpCards');
+  if (!box) return;
+  const coins = Object.keys(SCALP_SYMBOLS);
+  const views = coins.map((c) => lastScalpViews[c]).filter(Boolean);
+  if (!views.length) {
+    box.innerHTML = '<div class="empty">正在拉 1m / OI / 资金费...</div>';
+    return;
+  }
+  box.innerHTML = views.map(renderScalpCard).join('');
+}
+
+function setScalpNote(text) {
+  const el = document.getElementById('scalpBoardNote');
+  if (el) el.textContent = text || '';
+}
+
+async function loadOneScalp(coin, symbol, force, wantMeta) {
+  const klines1m = await fetchScalpKlines(symbol, force);
+  let meta = lsGet(LS_SCALP_META + symbol, SCALP_META_MS);
+  if (wantMeta || !meta) {
+    try { meta = await fetchScalpMeta(symbol, force); }
+    catch (e) { if (!meta) throw e; }
+  }
+  let depth = null;
+  try { depth = await fetchScalpDepth(symbol, force); }
+  catch { depth = null; }
+  return evaluateScalp({
+    coin,
+    symbol,
+    klines1m,
+    oiHist: meta && meta.oiHist,
+    oiNow: meta && meta.oiNow,
+    fundingRate: meta && meta.fundingRate,
+    nextFundingTime: meta && meta.nextFundingTime,
+    bias15: scalpBias15(coin),
+    depth,
+  });
+}
+
+async function loadScalpBoard(force = false, withMeta = false) {
+  const note = [];
+  const coins = Object.entries(SCALP_SYMBOLS);
+  await mapPoolClient(coins, 3, async ([coin, symbol]) => {
+    try {
+      const view = await loadOneScalp(coin, symbol, force, withMeta);
+      lastScalpViews[coin] = view;
+      renderScalpBoard();
+    } catch (e) {
+      note.push(coin + ': ' + (e.message || e));
+    }
+  });
+  const n = Object.keys(lastScalpViews).length;
+  setScalpNote(n
+    ? `浏览器直连币安合约 · ${n}/6 · 1m 约 20s 刷新 · OI/费率约 70s${note.length ? ' · ' + note.join('；') : ''}`
+    : (note.join('；') || '合约 OI/费率接口不可用（访问受限时超短线栏会空）'));
+}
+
+document.getElementById('scalpCards')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-scalp-expand]');
+  if (!btn) return;
+  const coin = btn.dataset.scalpExpand;
+  if (expandedScalpCoins.has(coin)) expandedScalpCoins.delete(coin);
+  else expandedScalpCoins.add(coin);
+  renderScalpBoard();
+});
 
 async function fetchOverview() {
   try {
@@ -3060,6 +3310,7 @@ function updateTimestamp() {
 function refreshAll(force = false) {
   fetchCoinGeckoPrices();
   loadEmaStrategy(force);
+  loadScalpBoard(force, true);
   fetchGoldPrice();
   fetchOverview();
   loadValuescanData();
@@ -3081,6 +3332,8 @@ setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
 setInterval(fetchOverview, 60000);
 setInterval(() => loadEmaStrategy(false), 60000);
+setInterval(() => loadScalpBoard(false, false), 20000);
+setInterval(() => loadScalpBoard(false, true), 75000);
 setInterval(loadValuescanData, 180000);
 setInterval(() => loadOwnSignals(), 300000); // 信号引擎每5分钟刷新
 setInterval(() => loadReversalSignals(), 300000); // 反转信号每5分钟刷新
