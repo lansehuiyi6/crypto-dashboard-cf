@@ -1139,7 +1139,6 @@ body {
 
 .short-section { margin: 0; }
 
-.panel-body-short { max-height: none; overflow: visible; }
 .panel-note {
   font-size: 12px;
   color: var(--text-tertiary);
@@ -1212,6 +1211,11 @@ body {
   flex: 1;
   overflow-y: auto;
   max-height: 520px;
+}
+
+.panel-body.panel-body-short {
+  max-height: none;
+  overflow: visible;
 }
 
 .token-list { display: flex; flex-direction: column; gap: 8px; }
