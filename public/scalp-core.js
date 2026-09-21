@@ -119,7 +119,7 @@ export function sessionVwap(bars) {
   return pv / vv;
 }
 
-export function depthView(depth, lastPrice) {
+export function depthView(depth, lastPrice, coin = '') {
   const bids = (depth && depth.bids) || [];
   const asks = (depth && depth.asks) || [];
   const px = Number(lastPrice);
@@ -141,7 +141,12 @@ export function depthView(depth, lastPrice) {
   const bestAsk = Number(Array.isArray(asks[0]) ? asks[0][0] : NaN);
   const spread = Number.isFinite(bestBid) && Number.isFinite(bestAsk) ? bestAsk - bestBid : null;
   const spreadBps = spread != null && Number.isFinite(px) && px > 0 ? (spread / px) * 10000 : null;
-  const thin = (spreadBps != null && spreadBps > 4) || bid.notional < 8000 || ask.notional < 8000;
+  const major = coin === 'BTC' || coin === 'ETH';
+  const maxSpread = major ? 2.5 : 10;
+  const minNotional = major ? 40000 : 6000;
+  const thin = (spreadBps != null && spreadBps > maxSpread)
+    || bid.notional < minNotional
+    || ask.notional < minNotional;
   return {
     bidNotional: bid.notional,
     askNotional: ask.notional,
@@ -344,6 +349,7 @@ export function detectSweepBounce(bars1m, oiHist) {
       dir: sweep.bounceDir,
       sweep,
       oiDelta,
+      entry: last.c,
       stop,
       target: balance,
       reason: oiDropped
@@ -388,6 +394,7 @@ export function detectPullback(bias15, bars1m) {
         play: 'B',
         dir: 'long',
         vwap,
+        entry: last.c,
         stop: Math.min(...last5.map((b) => b.l)) * 0.999,
         target: last.c + (last.c - Math.min(...last5.map((b) => b.l))),
         reason: '15m 偏多，1m 回踩 VWAP 后主动卖盘减弱。',
@@ -404,6 +411,7 @@ export function detectPullback(bias15, bars1m) {
       play: 'B',
       dir: 'short',
       vwap,
+      entry: last.c,
       stop: Math.max(...last5.map((b) => b.h)) * 1.001,
       target: last.c - (Math.max(...last5.map((b) => b.h)) - last.c),
       reason: '15m 偏空，1m 反抽 VWAP 后主动买盘减弱。',
@@ -455,6 +463,145 @@ function pickPlay(quad, sweep, pull, depth) {
   return { id: 'flat', label: '观望', cls: 'watch', hint: '没有可重复的 A/B 结构。每次只做一种，不追突破兼抄反转。' };
 }
 
+function distPct(entry, stop) {
+  const a = Number(entry);
+  const b = Number(stop);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a === 0) return null;
+  return Math.abs(a - b) / Math.abs(a) * 100;
+}
+
+function normalizeBracket(dir, entry, stop, coin) {
+  const px = Number(entry);
+  let sl = Number(stop);
+  if (!Number.isFinite(px) || !Number.isFinite(sl)) return null;
+  if (dir === 'long' && sl >= px) sl = px * 0.998;
+  if (dir === 'short' && sl <= px) sl = px * 1.002;
+  const major = coin === 'BTC' || coin === 'ETH';
+  const minD = major ? 0.15 : 0.22;
+  const maxD = major ? 0.40 : 0.70;
+  let d = distPct(px, sl);
+  if (d != null && d < minD) {
+    sl = dir === 'long' ? px * (1 - minD / 100) : px * (1 + minD / 100);
+    d = minD;
+  }
+  const risk = dir === 'long' ? px - sl : sl - px;
+  const tp1 = dir === 'long' ? px + risk : px - risk;
+  const tp15 = dir === 'long' ? px + risk * 1.5 : px - risk * 1.5;
+  return { entry: px, stop: sl, tp1, tp15, stopPct: d, wide: d != null && d > maxD };
+}
+
+function levNote(coin) {
+  if (coin === 'BTC' || coin === 'ETH') return { leverage: '5–10x 封顶', risk: '账户 0.3%–0.5%' };
+  return { leverage: '2–5x 起步', risk: '账户 0.3%，止损略宽' };
+}
+
+function fmtWaitPx(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '';
+  if (v >= 1000) return v.toLocaleString('en-US', { maximumFractionDigits: 1 });
+  if (v >= 1) return v.toFixed(2);
+  return v.toFixed(4);
+}
+
+/**
+ * 始终给出开单建议：能开则给方向/限价/止损/止盈；不能开则写清等什么、为什么不开。
+ */
+export function buildAdvice(view = {}) {
+  const coin = view.coin || '';
+  const px = Number(view.price);
+  const { leverage, risk } = levNote(coin);
+  const action = view.action || {};
+  const play = action.play || {};
+  const quad = view.quad || {};
+  const vwap = Number(view.vwap);
+  const style = action.id && action.id.startsWith('A') ? 'A 扫簇反抽' : action.id && action.id.startsWith('B') ? 'B 1m 回踩' : '';
+
+  const wait = (title, why, waitFor = '') => ({
+    stance: 'wait',
+    canOpen: false,
+    cls: 'watch',
+    title,
+    why,
+    waitFor,
+    style: '',
+    leverage,
+    risk,
+    order: '现在不挂单',
+    hold: '—',
+  });
+
+  const open = (dir, entry, stop, why, styleLabel) => {
+    const br = normalizeBracket(dir, entry, stop, coin);
+    if (!br) return wait('现在不开', '点位算不全，先不写开仓。');
+    return {
+      stance: dir === 'long' ? 'open_long' : 'open_short',
+      canOpen: true,
+      cls: dir,
+      title: dir === 'long' ? '建议轻仓试多' : '建议轻仓试空',
+      style: styleLabel,
+      why,
+      waitFor: '',
+      entry: br.entry,
+      stop: br.stop,
+      tp1: br.tp1,
+      tp15: br.tp15,
+      stopPct: br.stopPct,
+      rr: '先 1:1，稳住再 1:1.5',
+      leverage: br.wide ? leverage + '（止损偏宽，仓再小）' : leverage,
+      risk,
+      order: '优先限价，不要市价来回打',
+      hold: '几秒到半小时，不隔夜',
+    };
+  };
+
+  if (action.id === 'skip_thin') {
+    return wait('不开：盘口偏薄', action.hint || '滑点会把超短线优势吃掉。');
+  }
+  if (action.id === 'skip_cascade') {
+    return wait('不开：级联勿抄', action.hint || play.reason || '');
+  }
+  if (action.id === 'reduce_long') {
+    return {
+      ...wait('减多、不开新多', quad.hint || action.hint || ''),
+      stance: 'reduce',
+      title: '减多、不开新多',
+    };
+  }
+  if ((action.id === 'A_long' || action.id === 'A_short' || action.id === 'B_long' || action.id === 'B_short') && play.kind === 'entry') {
+    const dir = play.dir;
+    const entry = Number.isFinite(play.entry) ? play.entry : px;
+    const stop = play.stop;
+    const why = play.reason || action.hint || '';
+    return open(dir, entry, stop, why, style);
+  }
+  if (action.id === 'A_wait') {
+    const sw = play.sweep || view.sweep && view.sweep.sweep;
+    const bar = sw && sw.bar;
+    const reclaim = bar && Number.isFinite(bar.l) && Number.isFinite(sw.range)
+      ? (play.dir === 'short' ? bar.h - sw.range * 0.28 : bar.l + sw.range * 0.28)
+      : null;
+    const waitFor = reclaim
+      ? `等 1m 收回至 ${fmtWaitPx(reclaim)} 附近，且 CVD 不再创新极端、OI 回落后再按反方向开。`
+      : '等长针后的收回 + CVD 走平 + OI 回落，三件事齐了再开。';
+    return wait('先观察，不开', play.reason || action.hint || '', waitFor);
+  }
+  if (action.id === 'B_wait') {
+    const dirWord = play.dir === 'short' ? '反抽' : '回踩';
+    const waitFor = Number.isFinite(vwap)
+      ? `等 1m ${dirWord} VWAP ${fmtWaitPx(vwap)}，主动单减弱后再顺 15m 方向。`
+      : '等 1m 回到 VWAP 且主动单减弱。';
+    return wait('等回踩，先不开', play.reason || action.hint || '', waitFor);
+  }
+  if (action.id === 'bias_only') {
+    const dirWord = quad.id === 'healthy_short' ? '空' : '多';
+    const waitFor = Number.isFinite(vwap)
+      ? `方向偏好${dirWord}，但不要追。等 1m 回 VWAP ${fmtWaitPx(vwap)} 或出现扫簇确认。`
+      : `方向偏好${dirWord}，不要追现价，等 1m 回踩或扫簇。`;
+    return wait('有方向，现在不开', quad.hint || action.hint || '', waitFor);
+  }
+  return wait('观望，不开', action.hint || quad.hint || '没有可重复的 A/B 结构。');
+}
+
 export function evaluateScalp(input = {}) {
   const bars1m = parseKlines(input.klines1m);
   const hourBars = bars1m.slice(-60);
@@ -464,7 +611,7 @@ export function evaluateScalp(input = {}) {
   const fundingAnn = fundingAnnualizedPct(fundingRate);
   const fundLvl = classifyFunding(fundingAnn);
   const last = bars1m[bars1m.length - 1];
-  const depth = depthView(input.depth, last && last.c);
+  const depth = depthView(input.depth, last && last.c, input.coin);
   const quad = classifyQuadrant({ pricePct, oiPct, fundingAnn });
   const bias15 = input.bias15 === 'long' || input.bias15 === 'short' ? input.bias15 : 'watch';
   const sweep = detectSweepBounce(bars1m, input.oiHist);
@@ -472,8 +619,7 @@ export function evaluateScalp(input = {}) {
   const action = pickPlay(quad, sweep, pull, depth);
   const cvd = cumulativeCvd(closedBars(bars1m).slice(-30));
   const vwap = sessionVwap(closedBars(bars1m).slice(-45));
-
-  return {
+  const base = {
     coin: input.coin || '',
     symbol: input.symbol || '',
     price: last ? last.c : null,
@@ -496,4 +642,6 @@ export function evaluateScalp(input = {}) {
     ready: bars1m.length >= 40,
     ts: Date.now(),
   };
+  base.advice = buildAdvice(base);
+  return base;
 }

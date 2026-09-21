@@ -181,13 +181,13 @@ function classifyBias(major) {
   const strong = (change7d != null && change7d > 8 && change24h > 0.5) || change24h > 1.2;
   const wash = Math.abs(change24h) < 0.6 && pos > 0.35 && pos < 0.65;
 
-  if (weak) return { bias: '偏弱, 谨慎', color: 'gray', kind: 'weak' };
-  if (hot) return { bias: '强势上攻, 短线注意回撤', color: 'amber', kind: 'hot' };
-  if (pullback) return { bias: '冲高回落, 看支撑', color: 'blue', kind: 'pullback' };
-  if (strong) return { bias: '多头占优', color: 'amber', kind: 'bull' };
-  if (wash) return { bias: '震荡整理', color: 'blue', kind: 'range' };
-  if (change24h >= 0) return { bias: '偏多', color: 'blue', kind: 'bull' };
-  return { bias: '偏空观望', color: 'gray', kind: 'weak' };
+  if (weak) return { bias: '偏弱，谨慎开空', color: 'gray', kind: 'weak' };
+  if (hot) return { bias: '强势上攻，不宜追多', color: 'amber', kind: 'hot' };
+  if (pullback) return { bias: '冲高回落，回踩不破可试多', color: 'blue', kind: 'pullback' };
+  if (strong) return { bias: '多头占优，等回踩再开多', color: 'amber', kind: 'bull' };
+  if (wash) return { bias: '震荡整理，高抛低吸（非单边）', color: 'blue', kind: 'range' };
+  if (change24h >= 0) return { bias: '偏多，等回踩再开多', color: 'blue', kind: 'bull' };
+  return { bias: '偏空，先观望', color: 'gray', kind: 'weak' };
 }
 
 function rsiPhrase(rsi) {

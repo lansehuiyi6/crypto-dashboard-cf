@@ -1980,6 +1980,25 @@ async function fetchScalpDepth(symbol, force = false) {
   return data;
 }
 
+function renderScalpAdvice(view) {
+  const a = view.advice || {};
+  const rows = a.canOpen
+    ? `<div class="scalp-advice-rows">
+        <div><span>入场</span>限价 ${fmtPrice(a.entry)}</div>
+        <div><span>止损</span>${fmtPrice(a.stop)}${Number.isFinite(a.stopPct) ? ` · ${a.stopPct.toFixed(2)}%` : ''}</div>
+        <div><span>止盈</span>1:1 ${fmtPrice(a.tp1)} · 1:1.5 ${fmtPrice(a.tp15)}</div>
+      </div>
+      <div class="ema-muted">${a.leverage || ''} · ${a.risk || ''} · ${a.order || ''} · ${a.hold || ''}</div>`
+    : `<div class="scalp-advice-wait">${a.waitFor || a.why || '先不开。'}</div>
+      <div class="ema-muted">${a.order || '现在不挂单'}</div>`;
+  return `<div class="scalp-advice">
+    <div class="scalp-advice-kicker">开单建议</div>
+    <div class="scalp-advice-title"><span class="strategy-tag ${a.cls || 'watch'}">${a.title || '观望，不开'}</span>${a.style ? `<span class="ema-muted">${a.style}</span>` : ''}</div>
+    ${rows}
+    ${a.canOpen && a.why ? `<div class="ema-hint">${a.why}</div>` : ''}
+  </div>`;
+}
+
 function renderScalpCard(view) {
   const coin = view.coin;
   const open = expandedScalpCoins.has(coin);
@@ -1987,23 +2006,22 @@ function renderScalpCard(view) {
   const act = view.action || {};
   const play = act.play || {};
   const depth = view.depth || {};
+  const advice = view.advice || {};
   const biasCls = view.bias15 === 'long' ? 'long' : view.bias15 === 'short' ? 'short' : 'watch';
   const biasLab = view.bias15 === 'long' ? '15m 偏多' : view.bias15 === 'short' ? '15m 偏空' : '15m 走平';
-  const spark = sparklineSvg(view.cvdSpark, act.cls === 'short' ? 'down' : 'up');
-  const stop = Number.isFinite(play.stop) ? fmtPrice(play.stop) : '';
-  const target = Number.isFinite(play.target) ? fmtPrice(play.target) : '';
+  const spark = sparklineSvg(view.cvdSpark, advice.cls === 'short' ? 'down' : 'up');
   const fundAnn = Number.isFinite(view.fundingAnn) ? view.fundingAnn.toFixed(0) + '%' : '--';
   const spread = Number.isFinite(depth.spreadBps) ? depth.spreadBps.toFixed(2) + 'bp' : '--';
+  const accent = advice.cls || act.cls || 'watch';
   const detail = open ? `
     <div class="scalp-detail">
       <div class="ema-hint">${q.hint || ''}</div>
       <div class="ema-hint">${act.hint || play.reason || ''}</div>
-      ${stop || target ? `<div class="scalp-levels">止损外侧 ${stop || '--'} · 目标 ${target || '--'} <span class="ema-muted">（参考，须条件单）</span></div>` : ''}
       <div class="scalp-cvd"><span class="ema-muted">CVD</span>${spark}</div>
       <div class="ema-muted">点差 ${spread} · 买5 ${fmtNotional(depth.bidNotional)} / 卖5 ${fmtNotional(depth.askNotional)} · 下期资金费 ${fundingCountdown(view.nextFundingTime)}</div>
-      <div class="ema-muted">清算带为 1m 长针近似，不是热力图。U 本位逐仓；BTC/ETH 5–10x 封顶；单笔 0.3%–0.5% 账户风险。</div>
+      <div class="ema-muted">清算带为 1m 长针近似，不是热力图。须条件单；看板不下单。</div>
     </div>` : '';
-  return `<article class="scalp-card accent-${act.cls || 'watch'}${open ? ' is-open' : ''}" data-scalp-coin="${escAttr(coin)}">
+  return `<article class="scalp-card accent-${accent}${open ? ' is-open' : ''}${advice.canOpen ? ' has-entry' : ''}" data-scalp-coin="${escAttr(coin)}">
     <button type="button" class="scalp-toggle" data-scalp-expand="${escAttr(coin)}" aria-expanded="${open ? 'true' : 'false'}">
       <div class="scalp-head">
         <div>
@@ -2020,9 +2038,10 @@ function renderScalpCard(view) {
         <span>OI ${signedPct(view.oiPct)}</span>
         <span>费率 ${fmtFundingRate(view.fundingRate)} <span class="ema-muted">年化 ${fundAnn}</span></span>
       </div>
+      ${renderScalpAdvice(view)}
       <div class="scalp-action">
         <span class="strategy-tag ${act.cls || 'watch'}">${act.label || '观望'}</span>
-        <span class="sig-strat-caret">${open ? '收起' : '详情'}</span>
+        <span class="sig-strat-caret">${open ? '收起结构' : '怎么看'}</span>
       </div>
     </button>
     ${detail}
@@ -2392,6 +2411,64 @@ function extraShortSignalFromBoard(coin, kind) {
   };
 }
 
+const expandedShortCoins = new Set();
+
+function shortSignalStance(s, e15, e1h) {
+  const d15 = combinedDir(e15);
+  const d1h = combinedDir(e1h);
+  const raw = String(s.bias || '');
+  let stance = 'watch';
+  let actionLabel = '先观望';
+  if (d15 === 'long' && d1h === 'long') {
+    stance = 'long';
+    actionLabel = '可开多';
+  } else if (d15 === 'short' && d1h === 'short') {
+    stance = 'short';
+    actionLabel = '可开空';
+  } else if (d15 === 'long' && d1h === 'watch') {
+    stance = 'long';
+    actionLabel = '偏多·轻仓';
+  } else if (d15 === 'short' && d1h === 'watch') {
+    stance = 'short';
+    actionLabel = '偏空·轻仓';
+  } else if (d15 === 'watch' && d1h === 'long') {
+    stance = 'watch';
+    actionLabel = '1h偏多·等15m';
+  } else if (d15 === 'watch' && d1h === 'short') {
+    stance = 'watch';
+    actionLabel = '1h偏空·等15m';
+  } else if ((d15 === 'long' && d1h === 'short') || (d15 === 'short' && d1h === 'long')) {
+    stance = 'watch';
+    actionLabel = '分歧·不开';
+  } else if (/不宜追|注意回撤/.test(raw)) {
+    actionLabel = '偏多·不宜追';
+  } else if (/回踩不破可试多|冲高回落/.test(raw)) {
+    actionLabel = '回踩不破可试多';
+    stance = 'watch';
+  } else if (/震荡/.test(raw)) {
+    actionLabel = '震荡·勿追单边';
+  } else if (/偏空|偏弱/.test(raw)) {
+    actionLabel = '偏空·先观望';
+  } else if (/多头|偏多/.test(raw)) {
+    actionLabel = '偏多·等合成确认';
+  }
+  const s1 = (s.support || '').split(' -> ')[0] || '--';
+  const r1 = (s.resistance || '').split(' -> ')[0] || '--';
+  const l15 = (e15 && e15.combined && e15.combined.label) || '—';
+  const l1h = (e1h && e1h.combined && e1h.combined.label) || '—';
+  let preview;
+  if (stance === 'long') {
+    preview = `15m ${l15} · 1h ${l1h}。轻仓试多，支撑 ${s1}，止损放支撑外侧，目标 ${r1}。`;
+  } else if (stance === 'short') {
+    preview = `15m ${l15} · 1h ${l1h}。轻仓试空，阻力 ${r1}，止损放阻力外侧，目标 ${s1}。`;
+  } else if (actionLabel.indexOf('震荡') >= 0) {
+    preview = `15m ${l15} · 1h ${l1h}。震荡里高抛低吸，不要当单边可开多/可开空。`;
+  } else {
+    preview = `15m ${l15} · 1h ${l1h}。合成未同向，先观望：多等回踩 ${s1}，空等反抽 ${r1}。`;
+  }
+  return { stance, actionLabel, preview, d15, d1h };
+}
+
 function collectShortSignalsForRender() {
   const fixed = lastShortSignals || [];
   const pinned = listPinnedPairs()
@@ -2411,15 +2488,16 @@ function renderShortSignalCards() {
     box.innerHTML = '<div class="empty">等待价格快照后生成点位</div>';
     return;
   }
-  const sigColors = { amber: 'sig-amber', blue: 'sig-blue', gray: 'sig-gray' };
   box.innerHTML = signals.map(s => {
     const k = stratKeyFromCoin(s.coin);
     const e15 = (lastEmaBoard && lastEmaBoard['15m'] && lastEmaBoard['15m'][k]) || s.ema15;
     const e1h = (lastEmaBoard && lastEmaBoard['1h'] && lastEmaBoard['1h'][k]) || s.ema1h;
     const s1 = (s.support || '').split(' -> ')[0];
     const r1 = (s.resistance || '').split(' -> ')[0];
-    const a15 = clientEssayHtml('15 分钟', e15, s1, r1);
-    const a1h = clientEssayHtml('1 小时', e1h, s1, r1);
+    const st = shortSignalStance(s, e15, e1h);
+    const open = expandedShortCoins.has(s.coin);
+    const a15 = open ? clientEssayHtml('15 分钟', e15, s1, r1) : '';
+    const a1h = open ? clientEssayHtml('1 小时', e1h, s1, r1) : '';
     const chClass = Number(s.change24h) >= 0 ? 'up' : 'down';
     const ls15 = e15 && e15.lastSignal;
     const ls1h = e1h && e1h.lastSignal;
@@ -2429,12 +2507,28 @@ function renderShortSignalCards() {
         ? '<span class="sc-pinned-badge">本机</span>'
         : '';
     const kindClass = s.temporary ? ' is-temp' : s.pinned ? ' is-pinned' : '';
+    const tone = st.stance === 'long' ? 'sig-long' : st.stance === 'short' ? 'sig-short' : 'sig-watch';
+    const playTone = st.stance === 'long' ? 'is-long' : st.stance === 'short' ? 'is-short' : 'is-watch';
+    const details = open ? `
+        <div class="sc-tf-grid">
+          <div class="sc-tf">
+            <div class="sc-tf-h"><span class="ema-tf">15m</span>${emaCrossHtml(ls15)}</div>
+            <div class="sc-essay">${a15}</div>
+          </div>
+          <div class="sc-tf">
+            <div class="sc-tf-h"><span class="ema-tf">1h</span>${emaCrossHtml(ls1h)}</div>
+            <div class="sc-essay">${a1h}</div>
+          </div>
+        </div>` : '';
     return `
-      <div class="signal-card ${sigColors[s.color] || ''}${kindClass}">
+      <div class="signal-card ${tone}${kindClass}${open ? ' is-open' : ''}" data-short-coin="${escAttr(s.coin)}">
         <div class="sc-top">
           <div>
             <div class="sc-name">${s.coin}${kindBadge}</div>
-            <div class="sc-bias">${s.bias || ''}</div>
+            <div class="sc-bias">
+              <span class="strategy-tag ${st.stance === 'long' ? 'long' : st.stance === 'short' ? 'short' : 'watch'}">${st.actionLabel}</span>
+              <span class="sc-bias-sub">行情 ${s.bias || '--'}</span>
+            </div>
           </div>
           <div class="sc-px">
             <div class="sc-price">${s.priceText || '--'}</div>
@@ -2445,23 +2539,31 @@ function renderShortSignalCards() {
           <div class="sc-sr-item"><span>支撑</span>${s.support || '--'}</div>
           <div class="sc-sr-item"><span>阻力</span>${s.resistance || '--'}</div>
         </div>
-        <div class="sc-play">
+        <div class="sc-play ${playTone}">
           <div class="sc-kicker">操作要点</div>
-          ${s.strategy || ''}
-        </div>
-        <div class="sc-tf-grid">
-          <div class="sc-tf">
-            <div class="sc-tf-h"><span class="ema-tf">15m</span>${emaCrossHtml(ls15)}</div>
-            <div class="sc-essay">${a15}</div>
+          <div class="sc-play-tags">
+            <span class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(e15)}</span>
+            <span class="ema-summary-item"><span class="ema-tf">1h</span>${combinedHtml(e1h)}</span>
           </div>
-          <div class="sc-tf">
-            <div class="sc-tf-h"><span class="ema-tf">1h</span>${emaCrossHtml(ls1h)}</div>
-            <div class="sc-essay">${a1h}</div>
-          </div>
+          <div class="sc-play-preview">${st.preview}</div>
+          <div class="sc-play-full">${s.strategy || ''}</div>
         </div>
+        <button type="button" class="sc-expand" data-short-expand="${escAttr(s.coin)}" aria-expanded="${open ? 'true' : 'false'}">
+          ${open ? '收起 15m/1h 详情' : '查看 15m/1h 详情'}
+        </button>
+        ${details}
       </div>`;
   }).join('');
 }
+
+document.getElementById('signalList')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-short-expand]');
+  if (!btn) return;
+  const coin = btn.dataset.shortExpand;
+  if (expandedShortCoins.has(coin)) expandedShortCoins.delete(coin);
+  else expandedShortCoins.add(coin);
+  renderShortSignalCards();
+});
 
 async function loadMarketSignals() {
   try {
