@@ -40,6 +40,29 @@
       <div class="usdt-d-note">正在加载 USDT.D…</div>
     </div>
 
+    <section class="scalp-board" id="scalpBoard">
+      <div class="ema-board-header">
+        <div class="ema-board-title-row">
+          <h2>超短线方向单</h2>
+          <span class="ema-badge">15m 定方向 · 1m 进出 · 价/OI/费率</span>
+        </div>
+        <p class="ema-board-lead">先看「开单建议」：绿=可试多，红=可试空，灰=现在不开。上面三行是 1h 价/OI/费率和 15m 方向，用来解释为什么开或等。清算带是 1m 长针近似，不是热力图。每次只给一种打法。</p>
+        <details class="ema-board-help">
+          <summary>怎么读</summary>
+          <div class="ema-board-desc">
+            <p><strong>四象限：</strong>价涨+OI升+费率温和=趋势健康；价涨+OI升+费率极正=多头拥挤；价跌+OI降=多头被洗；价滞+高正费率=猎杀风险。</p>
+            <p><strong>A 扫簇反抽：</strong>扎进长针 → 量尖峰 → CVD 不再创新极端 → 反方向，止损在针尖外侧。扫完 OI 不降、价格继续推进 = 级联，不抄。</p>
+            <p><strong>B 15m 方向上的 1m 回踩：</strong>15m 明确多/空，1m 回 VWAP 且主动单减弱。15m 走平不在 1m 硬做趋势。</p>
+            <p>建议：U 本位逐仓；BTC/ETH 杠杆 5–10 倍封顶；单笔风险 0.3%–0.5%；能挂限价就挂限价。看板不下单。</p>
+          </div>
+        </details>
+      </div>
+      <div class="scalp-cards" id="scalpCards">
+        <div class="empty">正在拉 1m / OI / 资金费...</div>
+      </div>
+      <div class="ema-board-note" id="scalpBoardNote"></div>
+    </section>
+
     <section class="ema-board" id="emaBoard">
       <div class="ema-board-header">
         <div class="ema-board-title-row">
@@ -77,29 +100,6 @@
         <div class="empty">正在计算 15m / 1h 策略...</div>
       </div>
       <div class="ema-board-note" id="emaBoardNote"></div>
-    </section>
-
-    <section class="scalp-board" id="scalpBoard">
-      <div class="ema-board-header">
-        <div class="ema-board-title-row">
-          <h2>超短线方向单</h2>
-          <span class="ema-badge">15m 定方向 · 1m 进出 · 价/OI/费率</span>
-        </div>
-        <p class="ema-board-lead">先看「开单建议」：绿=可试多，红=可试空，灰=现在不开。上面三行是 1h 价/OI/费率和 15m 方向，用来解释为什么开或等。清算带是 1m 长针近似，不是热力图。每次只给一种打法。</p>
-        <details class="ema-board-help">
-          <summary>怎么读</summary>
-          <div class="ema-board-desc">
-            <p><strong>四象限：</strong>价涨+OI升+费率温和=趋势健康；价涨+OI升+费率极正=多头拥挤；价跌+OI降=多头被洗；价滞+高正费率=猎杀风险。</p>
-            <p><strong>A 扫簇反抽：</strong>扎进长针 → 量尖峰 → CVD 不再创新极端 → 反方向，止损在针尖外侧。扫完 OI 不降、价格继续推进 = 级联，不抄。</p>
-            <p><strong>B 15m 方向上的 1m 回踩：</strong>15m 明确多/空，1m 回 VWAP 且主动单减弱。15m 走平不在 1m 硬做趋势。</p>
-            <p>建议：U 本位逐仓；BTC/ETH 杠杆 5–10 倍封顶；单笔风险 0.3%–0.5%；能挂限价就挂限价。看板不下单。</p>
-          </div>
-        </details>
-      </div>
-      <div class="scalp-cards" id="scalpCards">
-        <div class="empty">正在拉 1m / OI / 资金费...</div>
-      </div>
-      <div class="ema-board-note" id="scalpBoardNote"></div>
     </section>
 
     <div class="short-term-stack">
