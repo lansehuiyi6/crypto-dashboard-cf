@@ -102,6 +102,128 @@
       <div class="ema-board-note" id="emaBoardNote"></div>
     </section>
 
+    <section class="creator-study" id="creatorStudy">
+      <div class="creator-study-kicker">新增独立栏 · 上面的短线策略、操作信号、反转和自有引擎都还在，这栏不写进那些结果</div>
+      <div class="ema-board-title-row">
+        <h2>博主读盘模拟</h2>
+        <span class="ema-badge">标题学习 · 2026-09-28 快照</span>
+      </div>
+      <p class="ema-board-lead">按 @zxhy189 和 Ronnie 交易指南最近 100 期标题里反复出现的习惯，对照当天币安盘面写的模拟。不是他们的口播原话，也不是实盘指令。价格不会跟着上面的实时看板一起跳。</p>
+      <div class="cs-limits">
+        <p>字幕没缓存下来：两频道抽样 8 条（含较早的视频）播放器里都没有字幕轨，简介是固定引流文案。对照一条有字幕的公开视频，同一套读取能拿到字幕。所以这一轮学的是标题句式，本地目录在 <code>data/creator-study</code>，往更早追加用 <code>python3 scripts/cache-creator-catalog.py --start 101 --end 200</code>。他们一旦打开字幕，同一脚本加 <code>--try-subs</code> 会把正文补上。</p>
+      </div>
+      <details class="cs-method" open>
+        <summary>两人的学习策略（分开记，不揉成一个信号）</summary>
+        <div class="cs-method-grid">
+          <div>
+            <h3>zxhy189 · 定价位，再等事件</h3>
+            <ul>
+              <li>先写死价位：挖坑、真空区、支阻互换、半分位、箱体沿。认收盘价和大阳/大阴，针尖不算站上。</li>
+              <li>低位打死不空，高位打死不多。急杀才是接筹码；支撑没守住时不抄半山腰。</li>
+              <li>强者回踩再做，弱反弹不追。突破要收盘站稳，假破可以等承接，不追破位。</li>
+              <li>BTC 是时钟。黄金、美债、美股存储/芯片用来看风险资产是不是一起洗。事件（加息、CPI、交割）只决定何时看预定价位。</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Ronnie · 一期只分辨一件事</h3>
+            <ul>
+              <li>标题就是题目：横盘之后往哪边、诱多还是回踩确认、小阴是回调还是蓄力、站上之后追还是等。</li>
+              <li>第一次碰阻力，默认不是用来破的。支撑要收盘或第二脚测试，信号比单独一个价更重要。</li>
+              <li>回踩要位置、力度、速度一起对。大周期没突破完，小周期支撑只小做、多等。</li>
+              <li>跌破之后不把延伸段追成空，也不猜底。等反抽失败，或等止跌 K。</li>
+            </ul>
+          </div>
+        </div>
+      </details>
+      <div class="cs-cols">
+        <article class="cs-col cs-col-zxhy">
+          <header class="cs-col-h">
+            <h3>zxhy189 模拟</h3>
+            <span class="cs-src">100 期 · 均长 24 分钟</span>
+          </header>
+          <p class="cs-quote">9月28日标题：BTC 要大洗，挖坑看 73633 附近；黄金加速跌、有破前低；美股被加息预期压着。</p>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">BTC</span><span class="cs-px">82,838</span><span class="strategy-tag watch">先别抄坑</span></div>
+            <p>还在 21 日均线 81,392 上方，20 日区间（74,968–87,396）位置 0.63，不算低位。今天跌 1.9%，量只有 20 日均量的 0.68 倍，还不是标题里的急杀。73633 和当天布林下轨约 73,300 很近，这是对照，不是说他在用布林；价格没到之前不预支。</p>
+            <p class="cs-levels">多看 85,200–87,400 收盘能不能拿回。空不在 8.3 万摸。洗到 7.8 万/7.5 万再看承接收盘，73,633 才是他点名的坑。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">ETH</span><span class="cs-px">2,651</span><span class="strategy-tag long">略强于 BTC</span></div>
+            <p>跌幅小于 BTC，均线仍在脚下。他遇到以太强于比特币时，短线会把以太放在前面，但只在守住约 2,590 的时候。破了就当成跟着洗，不单独抄。</p>
+            <p class="cs-levels">近高 2,807。守 2,590 只跟随；失守则不做英雄。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">SOL</span><span class="cs-px">118.3</span><span class="strategy-tag watch">强者，不追</span></div>
+            <p>20 日位置 0.77，离 21 日均线约 6%，是这组里最强的。124.95 前高今天没站住。关键位他不追，等回踩后的收盘。</p>
+            <p class="cs-levels">回踩 111–114 收盘还在，再按强者看。掉回 100 下面，这波强势结束。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">BNB</span><span class="cs-px">761</span><span class="strategy-tag watch">跟随</span></div>
+            <p>卡在 20 日区间中部。807 没破，704 没踩到，没有他自己会单做的价位。</p>
+            <p class="cs-levels">不单开。方向交给 BTC。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">XRP</span><span class="cs-px">1.488</span><span class="strategy-tag watch">半山腰不做</span></div>
+            <p>10 日振幅 19%，上下沿大约 1.66 和 1.25。他明确说过支撑没守住就不要抄在半山腰，1.49 就是这种位置。</p>
+            <p class="cs-levels">等 1.40 附近的承接收盘，或重新收上 1.55。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">DOGE</span><span class="cs-px">0.0931</span><span class="strategy-tag watch">弱，不接</span></div>
+            <p>今天约 −3.9%，10 日振幅 23%，是这组里最弱的。弱反弹他不追。</p>
+            <p class="cs-levels">不因为叙事去接。等它重新变成强者再看。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">XAU</span><span class="cs-px">4,162</span><span class="strategy-tag short">偏空，不抄</span></div>
+            <p>掉到 21/56 均线下面，20 日区间只剩约 5% 的位置。60 日高点 4,701 就是他 9月24日拿来对标尖顶的黄金。4,288 今天碰过又被压住，和 9月14日他盯过的位置叠在一起。前低 4,146 正在被打。</p>
+            <p class="cs-levels">加速段不接多。下面一档看 4,028。反弹进 4,288–4,320 仍是压力。</p>
+          </div>
+        </article>
+        <article class="cs-col cs-col-ronnie">
+          <header class="cs-col-h">
+            <h3>Ronnie 模拟</h3>
+            <span class="cs-src">100 期 · 均长 9 分钟</span>
+          </header>
+          <p class="cs-quote">9月28日标题：高位横盘之后通常往上还是往下。9月25日：回踩 83000 完成，之后该怎么操作。</p>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">BTC</span><span class="cs-px">82,838</span><span class="strategy-tag watch">等收盘再定性</span></div>
+            <p>价格又回到他标过的 83,000，9月25日那句「回踩完成」今天要重考，不能直接当确认。确认要 4 小时或日线收在 82,500 之上，不是盘中碰一下。近 6 根日线都是小实体，但他讲过的「布林极度收口 = 还在震荡」对不上：带宽在张（约 18%，五日前约 16%），这是从 87,400 撤下来的回调。</p>
+            <p class="cs-levels">上沿 87,000–87,400。收破 82,500 再看 78,000–80,000，不直接猜 73,633。今天量小、跌速不大，位置到了，力度和速度没到，所以挂着等。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">ETH</span><span class="cs-px">2,651</span><span class="strategy-tag watch">不单开</span></div>
+            <p>和 BTC 同一段回踩。2,807 是近高，2,651 没有自己的新台阶。大周期结论没出来之前，他不会为以太另做一套追多。</p>
+            <p class="cs-levels">等 BTC 的 83,000 收出方向，再决定跟不跟。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">SOL</span><span class="cs-px">118.3</span><span class="strategy-tag watch">等回踩，不追</span></div>
+            <p>124.9 碰过没站住。他的题目会是「站上之后追还是等」，答案是等。117.6 是今天第一脚低点，第一脚他不当支撑确认。</p>
+            <p class="cs-levels">要第二脚或收盘重新站上 124 附近，才从「等」改成「做」。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">BNB</span><span class="cs-px">761</span><span class="strategy-tag watch">没到位置</span></div>
+            <p>807 按他的说法，第一次冲阻力多半不是用来破的。761 在区间中间，没有「位置到了就进」。</p>
+            <p class="cs-levels">不下单。上看 807，下看 704 才进入他会盯的档。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">XRP</span><span class="cs-px">1.488</span><span class="strategy-tag watch">先定性</span></div>
+            <p>从 1.66 回到 1.49，题目是诱多还是回踩，现在答不出来。收在今天低点 1.47 附近只说明还在晃。</p>
+            <p class="cs-levels">没有确认之前不做。不把第一脚当支撑。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">DOGE</span><span class="cs-px">0.0931</span><span class="strategy-tag watch">不猜底</span></div>
+            <p>他做过支撑位反弹，但要位置先到。20 日低在 0.078，现价还在半路。</p>
+            <p class="cs-levels">不到 0.078–0.080 那一档，不接。</p>
+          </div>
+          <div class="cs-card">
+            <div class="cs-card-h"><span class="cs-sym">XAU</span><span class="cs-px">4,162</span><span class="strategy-tag watch">两头不做</span></div>
+            <p>他问过两句：跌破小时支撑是不是就变成空头，以及别猜底。现在是跌破之后的延伸，不是刚破的那一下，两句同时成立。</p>
+            <p class="cs-levels">不追空。反抽 4,288 失败再谈空；出现止跌阳线再谈多。</p>
+          </div>
+        </article>
+      </div>
+      <p class="cs-foot">快照取自 2026-09-28 币安现货（黄金为 U 本位 XAUUSDT）。绿标签沿用本页「多」的绿色，红标签沿用「空」的红色，灰是现在不动手。这一栏只供对照两位的读盘习惯。</p>
+    </section>
+
     <div class="short-term-stack">
       <section class="short-section">
         <div class="panel">
