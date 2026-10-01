@@ -3420,6 +3420,7 @@ function refreshAll(force = false) {
   loadOwnSignals();
   loadReversalSignals();
   loadBottomReversalSignals();
+  if (typeof window.loadCreatorStudy === 'function') window.loadCreatorStudy();
 }
 
 document.getElementById('refreshBtn').addEventListener('click', () => {
