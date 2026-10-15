@@ -97,7 +97,7 @@ EMA7/21/56、AlphaTrend（ATR）、布林带宽/%B、BOLL 中轴开仓，见 [do
 | `/api/valuescan/*` | 优先读快照 |
 | `/api/signals` | 读已发布信号 |
 | `/api/market-signals` | 短线操作面板（支撑/阻力随现价生成） |
-| `/api/ema-strategy` | 15m/1h EMA+AT+布林（页面优先浏览器直连币安，此接口兜底） |
+| `/api/ema-strategy` | 15m/1h EMA+AT+布林，4h/1d/1w 背景（页面优先浏览器直连；1m/5m 只在浏览器算） |
 | `/api/overview` | 总市值、BTC.D / ETH.D / USDT.D |
 
 ## 注意事项

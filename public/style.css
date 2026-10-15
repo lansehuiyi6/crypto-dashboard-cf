@@ -759,6 +759,10 @@ body {
   margin: 0 0 10px;
 }
 
+.ema-chip-row .ema-chip {
+  max-width: 100%;
+}
+
 .ema-chip-label {
   font-size: 10px;
   font-weight: 600;
@@ -791,10 +795,20 @@ body {
   background: rgba(248, 81, 73, 0.1);
 }
 
+.ema-tf-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .ema-tf-cols {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.ema-ltf-cols {
+  position: relative;
 }
 
 .ema-tf-col {
@@ -803,6 +817,23 @@ body {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   min-width: 0;
+}
+
+.ema-ltf-col {
+  background:
+    linear-gradient(180deg, rgba(88, 166, 255, 0.05), var(--bg-secondary));
+  border-color: rgba(88, 166, 255, 0.22);
+}
+
+.ema-role {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--blue);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(88, 166, 255, 0.12);
 }
 
 .ema-tf-col.dir-long {
@@ -815,6 +846,14 @@ body {
   background: linear-gradient(180deg, rgba(248, 81, 73, 0.06), var(--bg-secondary));
 }
 
+.ema-ltf-col.dir-long {
+  border-color: rgba(63, 185, 80, 0.4);
+}
+
+.ema-ltf-col.dir-short {
+  border-color: rgba(248, 81, 73, 0.4);
+}
+
 .ema-tf-head {
   display: flex;
   align-items: center;
@@ -823,6 +862,13 @@ body {
   margin-bottom: 6px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border-color);
+}
+
+.ema-tf-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 .ema-metrics {
@@ -862,6 +908,149 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: normal;
   word-break: break-word;
+}
+
+.ema-qual {
+  margin: 0 0 10px;
+  padding: 8px 10px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.ema-qual-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin-bottom: 2px;
+}
+
+.ema-qual-kicker {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ema-qual-votes,
+.ema-qual-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+
+.ema-qual-votes {
+  margin-left: auto;
+  text-align: right;
+}
+
+.ema-qual-meta {
+  margin: 0 0 6px;
+}
+
+.ema-qual-list {
+  display: grid;
+  gap: 1px 0;
+}
+
+.ema-qual-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1.1fr) minmax(0, 1.4fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 2px 0;
+}
+
+.ema-qual-mark {
+  font-weight: 700;
+  text-align: center;
+}
+
+.ema-qual-row.is-pass .ema-qual-mark { color: var(--teal); }
+.ema-qual-row.is-fail .ema-qual-mark { color: var(--up); }
+.ema-qual-row.is-skip .ema-qual-mark { color: var(--text-tertiary); }
+.ema-qual-row.is-pass .ema-qual-name { color: var(--text-primary); }
+.ema-qual-row.is-fail .ema-qual-name { color: var(--text-secondary); }
+
+.ema-qual-name {
+  color: var(--text-secondary);
+}
+
+.ema-qual-val {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.ema-qual-pred {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.ema-qual-reason {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.ema-qual-miss {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.ema-qual-miss.is-ok {
+  color: var(--teal);
+}
+
+.macd-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  height: 20px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.macd-bar {
+  display: inline-block;
+  width: 3px;
+  min-height: 2px;
+  border-radius: 1px;
+}
+
+.macd-bar.up {
+  background: var(--teal);
+  align-self: flex-end;
+  margin-bottom: 10px;
+}
+
+.macd-bar.dn {
+  background: var(--up);
+  align-self: flex-start;
+  margin-top: 10px;
+}
+
+.macd-bar.is-open {
+  opacity: 0.4;
+}
+
+.macd-bar.is-closed {
+  width: 4px;
+}
+
+.ema-chip .macd-bars {
+  margin-left: 8px;
 }
 
 .ema-hint {
@@ -2637,6 +2826,10 @@ a.signal-token-symbol:hover {
     grid-template-columns: 32px minmax(0, 1fr);
     gap: 6px;
   }
+  .ema-tf-cols { grid-template-columns: 1fr; }
+  .ema-qual-votes { margin-left: 0; text-align: left; }
+  .ema-qual-row { grid-template-columns: 16px minmax(0, 1fr); }
+  .ema-qual-val { text-align: left; grid-column: 2; }
 }
 
 @media (max-width: 500px) {

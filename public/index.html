@@ -67,7 +67,7 @@
       <div class="ema-board-header">
         <div class="ema-board-title-row">
           <h2>短线策略看板</h2>
-          <span class="ema-badge">15m / 1h · 4h/1d 背景</span>
+          <span class="ema-badge">1m/5m 触发确认 · 15m/1h 结构 · 4h/1d/1w 背景</span>
           <div class="ema-notify" id="emaNotify">
             <button type="button" class="ema-notify-btn" id="emaNotifyToggle">浏览器通知</button>
             <button type="button" class="ema-notify-btn ghost" id="emaNotifyTest" hidden>测试</button>
@@ -77,7 +77,7 @@
             <span class="ema-notify-status" id="emaNotifyStatus"></span>
           </div>
         </div>
-        <p class="ema-board-lead">合成信号看开仓；穿越只是标记。MACD+KDJ / Keltner 为独立层（不进共振）。Keltner 单边过滤：15m 看 1h ADX（背景 4h），1h 看 4h ADX。开启通知后重要变化会提醒（需保持页面开启）。</p>
+        <p class="ema-board-lead">1m 触发、5m 确认、15m/1h 结构。合成信号看开仓；穿越只是标记。MACD+KDJ / Keltner 为独立层（不进共振）。Keltner 单边过滤：15m 看 1h ADX（背景 4h），1h 看 4h ADX。开启通知后重要变化会提醒（需保持页面开启）。</p>
         <div class="ema-temp-bar" id="emaTempBar">
           <label class="ema-temp-label" for="emaTempSymbol">临时币对</label>
           <input type="text" id="emaTempSymbol" class="ema-temp-input" placeholder="如 DOGE / PEPEUSDT" autocomplete="off" spellcheck="false" maxlength="20">
@@ -91,13 +91,16 @@
             <p><strong>上穿/下穿56</strong>只是穿越标记，不是开仓。<strong>做多/做空</strong>才叠加 MACD 0 轴 + RSI6 过滤。</p>
             <p><strong>AlphaTrend</strong>当方向开关。<strong>共振开仓</strong> = AT ∩（EMA 过滤 或 中轴）；开口顺势、闭口暂缓。</p>
             <p><strong>布林(20,2)</strong>看波动环境；<strong>中轴</strong>：中轨 + EMA6/12 + 放量，止损 1.5%。</p>
+            <p><strong>多周期</strong>：1d/1w 定只做多/只做空/两边都做；4h 看强势/走弱/超跌；15m/1h 看收口开口与中轨；5m 确认 1m 方向；1m 收盘反穿 EMA56 或站回下轨才是时点。金叉后 K 线从布林一侧走到另一侧，偏反弹。</p>
+            <p><strong>开仓资格</strong>把 1w→1m 对照成 ✓/✕ 清单，并给出试多/试空/轻仓/等触发。不删下面各周期原状态，也不改共振。</p>
+            <p><strong>周线 MACD</strong>(12,26,9) 看上一根已收盘周 K 的柱：&gt;0 偏多只开多，&lt;0 偏空只开空。本周柱仅作对照（未收）。成交量用各周期 K 线均量比，不另拉接口。</p>
             <p><strong>MACD+KDJ</strong>：柱&gt;0 且 DIF&gt;DEA 入场；K/D/J 全&gt;80 离场（≠反手做空）。</p>
             <p><strong>Keltner 回归</strong>：外轨刺破武装 → 内轨回踩入场 → 中轨止盈 / 外轨止损。单边过滤用更高周期 ADX（15m→1h，1h→4h）；≥25 慎用，&lt;20 更友好。不进共振。</p>
           </div>
         </details>
       </div>
       <div class="ema-board-body" id="emaCards">
-        <div class="empty">正在计算 15m / 1h 策略...</div>
+        <div class="empty">正在计算 1m / 5m / 15m / 1h 策略...</div>
       </div>
       <div class="ema-board-note" id="emaBoardNote"></div>
     </section>

@@ -6,6 +6,7 @@ import {
   evaluateEmaTrendStrategy,
   evaluateMacdKdjSignal,
   evaluateAdx,
+  evaluateHtfContext,
   annotateMacdKdjContext,
   annotateKeltnerWithHtfAdx,
   attachAlphaTrend,
@@ -117,20 +118,26 @@ function enrichBoardMacdKdj(board) {
 
 export function normalizeBoard(raw) {
   const empty = {
+    '1m': {},
+    '5m': {},
     '15m': {},
     '1h': {},
     '4h': {},
     '1d': {},
+    '1w': {},
     adx4h: {},
     usdtD: { '15m': null, '1h': null },
   };
   if (!raw || typeof raw !== 'object') return empty;
-  if (raw['15m'] || raw['1h'] || raw['4h'] || raw['1d'] || raw.usdtD) {
+  if (raw['15m'] || raw['1h'] || raw['4h'] || raw['1d'] || raw['1w'] || raw['1m'] || raw['5m'] || raw.usdtD) {
     const out = {
+      '1m': raw['1m'] && typeof raw['1m'] === 'object' ? raw['1m'] : {},
+      '5m': raw['5m'] && typeof raw['5m'] === 'object' ? raw['5m'] : {},
       '15m': raw['15m'] && typeof raw['15m'] === 'object' ? raw['15m'] : {},
       '1h': raw['1h'] && typeof raw['1h'] === 'object' ? raw['1h'] : {},
       '4h': raw['4h'] && typeof raw['4h'] === 'object' ? raw['4h'] : {},
       '1d': raw['1d'] && typeof raw['1d'] === 'object' ? raw['1d'] : {},
+      '1w': raw['1w'] && typeof raw['1w'] === 'object' ? raw['1w'] : {},
       adx4h: raw.adx4h && typeof raw.adx4h === 'object' ? raw.adx4h : {},
       usdtD: raw.usdtD && typeof raw.usdtD === 'object' ? raw.usdtD : empty.usdtD,
       errors: raw.errors || [],
@@ -159,10 +166,13 @@ function mergeBoards(live, cached) {
   const a = normalizeBoard(live);
   const b = normalizeBoard(cached);
   const out = {
+    '1m': { ...b['1m'] },
+    '5m': { ...b['5m'] },
     '15m': { ...b['15m'] },
     '1h': { ...b['1h'] },
     '4h': { ...b['4h'] },
     '1d': { ...b['1d'] },
+    '1w': { ...b['1w'] },
     adx4h: { ...(b.adx4h || {}) },
     usdtD: { ...b.usdtD },
     errors: a.errors || [],
@@ -306,10 +316,13 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
   const includeUsdtD = opts.includeUsdtD !== false;
   const intervals = opts.intervals || [...EXEC_INTERVALS, ...HTF_INTERVALS];
   const board = {
+    '1m': {},
+    '5m': {},
     '15m': {},
     '1h': {},
     '4h': {},
     '1d': {},
+    '1w': {},
     adx4h: {},
     usdtD: { '15m': null, '1h': null },
     errors: [],
@@ -328,10 +341,11 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
             klines = await fetchCgKlines(coin, interval);
           }
           if (isHtf) {
-            board[interval][coin] = evaluateMacdKdjSignal(klines, coin, { interval });
+            board[interval][coin] = evaluateHtfContext(klines, coin, { interval });
             if (!board[interval][coin]) board.errors.push(`${coin} ${interval}: MACD+KDJ 不足`);
             if (interval === '4h') {
-              const adx = evaluateAdx(klines, { interval: '4h' });
+              const adx = (board[interval][coin] && board[interval][coin].adx)
+                || evaluateAdx(klines, { interval: '4h' });
               if (adx) board.adx4h[coin] = adx;
             }
           } else {

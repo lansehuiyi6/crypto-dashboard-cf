@@ -3,13 +3,20 @@ import {
   evaluateEmaTrendStrategy,
   evaluateMacdKdjSignal,
   evaluateAdx,
+  evaluateHtfContext,
+  evaluateLtfPulse,
+  evaluateTfForecast,
+  formatMacdHist,
+  enrichBoardLtf,
   annotateMacdKdjContext,
   annotateKeltnerWithHtfAdx,
   attachAlphaTrend,
   toDominanceKlines,
   INTERVAL_MS,
+  LTF_INTERVALS,
   EXEC_INTERVALS,
   HTF_INTERVALS,
+  BOARD_INTERVALS,
 } from './ema-core.js';
 import { SCALP_SYMBOLS, evaluateScalp } from './scalp-core.js';
 
@@ -220,7 +227,7 @@ function getStrategySymbolMap() {
 
 function pruneCoinFromBoard(coin) {
   if (!lastEmaBoard || !coin) return;
-  for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+  for (const tf of BOARD_INTERVALS) {
     if (lastEmaBoard[tf]) delete lastEmaBoard[tf][coin];
   }
   if (lastEmaBoard.adx4h) delete lastEmaBoard.adx4h[coin];
@@ -315,7 +322,7 @@ async function validateBinanceUsdtSymbol(symbol) {
 async function fetchSymbolIntoBoard(board, coin, symbol, force = false) {
   board.errors = Array.isArray(board.errors) ? board.errors : [];
   board.adx4h = board.adx4h || {};
-  for (const interval of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+  for (const interval of BOARD_INTERVALS) {
     board[interval] = board[interval] || {};
   }
   const execJobs = EXEC_INTERVALS.map(async (interval) => {
@@ -333,12 +340,12 @@ async function fetchSymbolIntoBoard(board, coin, symbol, force = false) {
   });
   const htfJobs = HTF_INTERVALS.map(async (interval) => {
     try {
-      const klines = await getKlinesCached(symbol, interval, force, interval === '1d' ? 120 : 140);
-      const mk = macdKdjFromKlines(klines, coin, interval);
+      const klines = await getKlinesCached(symbol, interval, force, htfKlineLimit(interval));
+      const mk = htfFromKlines(klines, coin, interval);
       board[interval][coin] = mk;
       if (!mk) board.errors.push(coin + ' ' + interval + ': MACD+KDJ 不足');
       if (interval === '4h') {
-        const adx = evaluateAdx(klines, { interval: '4h' });
+        const adx = (mk && mk.adx) || evaluateAdx(klines, { interval: '4h' });
         if (adx) board.adx4h[coin] = adx;
       }
     } catch (e) {
@@ -349,6 +356,21 @@ async function fetchSymbolIntoBoard(board, coin, symbol, force = false) {
     }
   });
   await Promise.all([...execJobs, ...htfJobs]);
+  const ltfJobs = LTF_INTERVALS.map(async (interval) => {
+    try {
+      const klines = await getKlinesCached(symbol, interval, force, 160);
+      const row = ltfFromKlines(klines, coin, interval);
+      board[interval][coin] = row;
+      if (!row) board.errors.push(coin + ' ' + interval + ': 1m/5m 指标不足');
+    } catch (e) {
+      if (!board[interval][coin]) {
+        board[interval][coin] = null;
+        board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+      }
+    }
+  });
+  await Promise.all(ltfJobs);
+  enrichBoardLtf(board, Object.keys(getStrategySymbolMap()));
   board.cached = false;
   board.fetchedAt = Date.now();
 }
@@ -446,11 +468,11 @@ function mergeTempRowsIntoBoard(base, client) {
     errors: [...(Array.isArray(base.errors) ? base.errors : []), ...(Array.isArray(client.errors) ? client.errors : [])],
     adx4h: { ...(base.adx4h || {}) },
   };
-  for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+  for (const tf of BOARD_INTERVALS) {
     out[tf] = { ...(base[tf] || {}) };
   }
   for (const p of getExtraWatchPairs()) {
-    for (const tf of [...EXEC_INTERVALS, ...HTF_INTERVALS]) {
+    for (const tf of BOARD_INTERVALS) {
       if (client[tf] && client[tf][p.coin] != null) out[tf][p.coin] = client[tf][p.coin];
     }
     if (client.adx4h && client.adx4h[p.coin] != null) out.adx4h[p.coin] = client.adx4h[p.coin];
@@ -845,20 +867,37 @@ function initEmaNotifyUi() {
 }
 
 function klineFreshMs(interval) {
-  if (interval === '1m') return 15 * 1000;
+  if (interval === '1m') return 25 * 1000;
+  if (interval === '5m') return 55 * 1000;
   if (interval === '15m') return 90 * 1000;
   if (interval === '1h') return 4 * 60 * 1000;
   if (interval === '4h') return 20 * 60 * 1000;
   if (interval === '1d') return 2 * 60 * 60 * 1000;
+  if (interval === '1w') return 6 * 60 * 60 * 1000;
   return 4 * 60 * 1000;
+}
+
+function htfKlineLimit(interval) {
+  if (interval === '1w') return 100;
+  if (interval === '1d') return 120;
+  return 140;
+}
+
+function klineMinBars(interval, limit) {
+  if (interval === '1w') return 36;
+  if (interval === '1d') return 60;
+  return Math.min(80, Math.max(40, Number(limit) || 80));
 }
 
 function emptyBoard() {
   return {
+    '1m': {},
+    '5m': {},
     '15m': {},
     '1h': {},
     '4h': {},
     '1d': {},
+    '1w': {},
     adx4h: {},
     usdtD: {},
     source: 'browser',
@@ -877,6 +916,14 @@ function macdKdjFromKlines(klines, coin, interval) {
   return evaluateMacdKdjSignal(klines, coin, { interval });
 }
 
+function htfFromKlines(klines, coin, interval) {
+  return evaluateHtfContext(klines, coin, { interval });
+}
+
+function ltfFromKlines(klines, coin, interval) {
+  return evaluateLtfPulse(klines, coin, { interval });
+}
+
 function enrichBoardMacdKdj(board) {
   for (const tf of EXEC_INTERVALS) {
     for (const coin of Object.keys(getStrategySymbolMap())) {
@@ -886,6 +933,7 @@ function enrichBoardMacdKdj(board) {
     }
   }
   enrichBoardKeltnerAdx(board);
+  enrichBoardLtf(board, Object.keys(getStrategySymbolMap()));
 }
 
 function enrichBoardKeltnerAdx(board) {
@@ -923,6 +971,7 @@ function enrichBoardKeltnerAdx(board) {
 
 function hydrateBoardFromCache(board) {
   let hits = 0;
+  for (const tf of BOARD_INTERVALS) board[tf] = board[tf] || {};
   for (const [coin, symbol] of Object.entries(getStrategySymbolMap())) {
     for (const interval of EXEC_INTERVALS) {
       const cached = lsGet(LS_KLINE + symbol + ':' + interval, KLINE_STALE_MAX_MS);
@@ -936,18 +985,31 @@ function hydrateBoardFromCache(board) {
       } catch { /* ignore bad cache */ }
     }
     for (const interval of HTF_INTERVALS) {
-      const maxAge = interval === '1d' ? 6 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000;
+      const maxAge = interval === '1w' ? 24 * 60 * 60 * 1000
+        : interval === '1d' ? 6 * 60 * 60 * 1000
+          : 2 * 60 * 60 * 1000;
       const cached = lsGet(LS_KLINE + symbol + ':' + interval, maxAge);
       if (!cached) continue;
       try {
-        const mk = macdKdjFromKlines(cached, coin, interval);
+        const mk = htfFromKlines(cached, coin, interval);
         if (mk) {
           board[interval][coin] = mk;
           hits += 1;
         }
         if (interval === '4h') {
-          const adx = evaluateAdx(cached, { interval: '4h' });
+          const adx = (mk && mk.adx) || evaluateAdx(cached, { interval: '4h' });
           if (adx) board.adx4h[coin] = adx;
+        }
+      } catch { /* ignore */ }
+    }
+    for (const interval of LTF_INTERVALS) {
+      const cached = lsGet(LS_KLINE + symbol + ':' + interval, KLINE_STALE_MAX_MS);
+      if (!cached) continue;
+      try {
+        const row = ltfFromKlines(cached, coin, interval);
+        if (row) {
+          board[interval][coin] = row;
+          hits += 1;
         }
       } catch { /* ignore */ }
     }
@@ -1028,7 +1090,7 @@ async function fetchKlinesClient(symbol, interval, limit = KLINE_LIMIT) {
           continue;
         }
         const data = await res.json();
-        if (Array.isArray(data) && data.length >= 80) return data;
+        if (Array.isArray(data) && data.length >= klineMinBars(interval, lim)) return data;
         lastErr = new Error('klines short');
       } catch (e) {
         lastErr = e;
@@ -1346,7 +1408,7 @@ function macdKdjActionClass(view) {
 function macdKdjHtml(view) {
   if (!view) return '<span class="strategy-tag watch">--</span>';
   const cls = macdKdjActionClass(view);
-  const hist = Number.isFinite(view.hist) ? view.hist.toPrecision(3) : '--';
+  const hist = formatMacdHist(view.hist);
   const k = Number.isFinite(view.k) ? view.k.toFixed(0) : '--';
   const d = Number.isFinite(view.d) ? view.d.toFixed(0) : '--';
   const j = Number.isFinite(view.j) ? view.j.toFixed(0) : '--';
@@ -1451,21 +1513,121 @@ function sparklineSvg(values, tone = 'up') {
   return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><path d="${path}" fill="none" stroke="${stroke}" stroke-width="1.5" /></svg>`;
 }
 
+function htfChipClass(row, fallback) {
+  if (!row) return 'watch';
+  const wb = row.weeklyMacd || (row.htf && row.htf.weeklyMacd);
+  if (wb && wb.bias === 'long') return 'long';
+  if (wb && wb.bias === 'short') return 'short';
+  const st = row.htf && row.htf.stance;
+  if (st === 'long-only' || st === 'long-bias') return 'long';
+  if (st === 'short-only' || st === 'short-bias') return 'short';
+  const mid = row.htf && row.htf.midKind;
+  if (mid === 'strong' || mid === 'firm') return 'long';
+  if (mid === 'oversold' || mid === 'weak' || mid === 'soft') return 'short';
+  if (row.overbought) return 'short';
+  if (row.macdBull) return 'long';
+  return fallback || 'watch';
+}
+
+function macdBarsHtml(spark) {
+  const arr = (spark || []).filter((v) => Number.isFinite(v));
+  if (arr.length < 4) return '';
+  const max = Math.max(...arr.map((v) => Math.abs(v)), 1e-12);
+  const last = arr.length - 1;
+  const bars = arr.map((h, i) => {
+    const px = Math.max(2, Math.round((Math.abs(h) / max) * 10));
+    const forming = i === last;
+    const closed = i === last - 1;
+    const cls = (h >= 0 ? 'up' : 'dn') + (forming ? ' is-open' : '') + (closed ? ' is-closed' : '');
+    return `<i class="macd-bar ${cls}" style="height:${px}px"></i>`;
+  }).join('');
+  return `<span class="macd-bars" title="MACD(12,26,9) 柱：加粗为上一根已收盘，半透明为本周期未收">${bars}</span>`;
+}
+
+function volHtml(vol) {
+  if (!vol || !vol.label) return '<span class="ema-muted">量 --</span>';
+  const cls = vol.kind === 'high' ? 'long' : vol.kind === 'low' ? 'short' : 'watch';
+  const rx = Number.isFinite(vol.ratio) ? vol.ratio.toFixed(2) + 'x' : '--';
+  return `<span class="strategy-tag ${cls}">${vol.label}</span><span class="ema-meta">${rx}</span>`;
+}
+
+function fmtDistPct(n) {
+  if (!Number.isFinite(n)) return '--';
+  const sign = n > 0 ? '+' : '';
+  return sign + n.toFixed(2) + '%';
+}
+
+function htfMkTail(row) {
+  const hist = formatMacdHist(row.hist);
+  const k = Number.isFinite(row.k) ? row.k.toFixed(0) : '--';
+  const d = Number.isFinite(row.d) ? row.d.toFixed(0) : '--';
+  const j = Number.isFinite(row.j) ? row.j.toFixed(0) : '--';
+  return `Hist ${hist} · KDJ ${k}/${d}/${j}`;
+}
+
 function macdKdjBgHtml(board, coin) {
   const h4 = board && board['4h'] && board['4h'][coin];
   const d1 = board && board['1d'] && board['1d'][coin];
-  const c4 = !h4 ? 'watch' : h4.overbought ? 'short' : h4.macdBull ? 'long' : 'watch';
-  const c1 = !d1 ? 'watch' : d1.overbought ? 'short' : d1.macdBull ? 'long' : 'watch';
-  const label4 = !h4
-    ? '4h 背景未就绪'
-    : `${h4.overbought ? '4h 超买' : h4.macdBull ? '4h 多头' : '4h 空头'} · Hist ${Number.isFinite(h4.hist) ? h4.hist.toPrecision(3) : '--'} · KDJ ${Number.isFinite(h4.k) ? h4.k.toFixed(0) : '--'}/${Number.isFinite(h4.d) ? h4.d.toFixed(0) : '--'}/${Number.isFinite(h4.j) ? h4.j.toFixed(0) : '--'}`;
-  const label1 = !d1
-    ? '1d 背景未就绪'
-    : `${d1.overbought ? '1d 超买' : d1.macdBull ? '1d 多头' : '1d 空头'} · ${d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线非多头环境'}`;
+  const w1 = board && board['1w'] && board['1w'][coin];
+  const h4h = h4 && h4.htf;
+  const d1h = d1 && d1.htf;
+  const w1h = w1 && w1.htf;
+
+  let label4;
+  if (!h4) label4 = '4h 背景未就绪';
+  else {
+    const mid = h4h && h4h.midState ? h4h.midState : (h4.overbought ? '超买' : h4.macdBull ? '多头' : '空头');
+    const dist = h4h && Number.isFinite(h4h.distPct) ? `距EMA56 ${fmtDistPct(h4h.distPct)}` : '';
+    const zone = h4h && h4h.bb ? h4h.bb.zoneLabel : '';
+    const hv = h4.volume || (h4h && h4h.volume);
+    const vol = hv && hv.label
+      ? `量${hv.label}${Number.isFinite(hv.ratio) ? ' ' + hv.ratio.toFixed(2) + 'x' : ''}`
+      : '';
+    label4 = [`4h ${mid}`, dist, zone, vol, htfMkTail(h4)].filter(Boolean).join(' · ');
+  }
+
+  let label1;
+  if (!d1) label1 = '1d 背景未就绪';
+  else {
+    const mk = d1.overbought ? '1d 超买' : d1.macdBull ? '1d 多头' : '1d 空头';
+    const env = d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线非多头环境';
+    const stance = d1h && d1h.stanceLabel ? d1h.stanceLabel : '';
+    const adx = d1h && d1h.adx ? `ADX${d1h.adx.adx.toFixed(0)}${d1h.adx.regimeLabel}` : '';
+    const ema = d1h && d1h.emaTrendLabel ? d1h.emaTrendLabel : '';
+    label1 = [mk, stance, env, ema, adx].filter(Boolean).join(' · ');
+  }
+
+  let labelW = '';
+  let wBars = '';
+  if (w1) {
+    const wb = w1.weeklyMacd || (w1h && w1h.weeklyMacd);
+    const wv = w1.volume || (w1h && w1h.volume);
+    if (wb) {
+      const closed = Number.isFinite(wb.closedHist) ? `上周柱 ${formatMacdHist(wb.closedHist)}` : '上周柱 --';
+      const forming = Number.isFinite(wb.formingHist) ? `本周柱 ${formatMacdHist(wb.formingHist)}未收` : '';
+      const vol = wv && wv.label
+        ? `周量${wv.label}${Number.isFinite(wv.ratio) ? ' ' + wv.ratio.toFixed(2) + 'x' : ''}`
+        : '';
+      labelW = [`1w ${wb.stanceLabel}`, closed, forming, vol].filter(Boolean).join(' · ');
+      wBars = macdBarsHtml(wb.histSpark);
+    } else {
+      const mk = w1.overbought ? '1w 超买' : w1.macdBull ? '1w 多头' : '1w 空头';
+      const stance = w1h && w1h.stanceLabel ? w1h.stanceLabel : '';
+      const adx = w1h && w1h.adx ? `ADX${w1h.adx.adx.toFixed(0)}${w1h.adx.regimeLabel}` : '';
+      labelW = [mk, stance, adx].filter(Boolean).join(' · ');
+      wBars = macdBarsHtml(w1.histSpark);
+    }
+  }
+
+  const chips = [
+    w1 ? `<span class="ema-chip ${htfChipClass(w1)}" title="1w 用上一根已收盘周K的 MACD(12,26,9) 柱：>0 偏多只开多，<0 偏空只开空">${labelW}${wBars}</span>` : '',
+    `<span class="ema-chip ${htfChipClass(d1)}" title="1d 大背景：趋势还是震荡">${label1}</span>`,
+    `<span class="ema-chip ${htfChipClass(h4)}" title="4h 中期：强势/走弱/超跌">${label4}</span>`,
+  ].filter(Boolean).join('');
+
   return `<div class="ema-chip-row" aria-label="大周期背景">
     <span class="ema-chip-label">背景</span>
-    <span class="ema-chip ${c4}" title="4h 作顺势/逆势过滤">${label4}</span>
-    <span class="ema-chip ${c1}" title="1d 只作文案环境，不当日内出场">${label1}</span>
+    ${chips}
   </div>`;
 }
 
@@ -1498,9 +1660,77 @@ function emaMetric(label, valueHtml) {
   return `<div class="ema-metric"><span class="ema-metric-k">${label}</span><span class="ema-metric-v">${valueHtml}</span></div>`;
 }
 
-function renderEmaTfCol(tf, row) {
+function tfRoleLabel(tf) {
+  if (tf === '1m') return '触发';
+  if (tf === '5m') return '确认';
+  if (tf === '15m' || tf === '1h') return '结构';
+  if (tf === '4h') return '中期';
+  if (tf === '1d' || tf === '1w') return '背景';
+  return '';
+}
+
+function goldCrossHtml(g) {
+  if (!g) return '<span class="ema-muted">未见金叉/死叉</span>';
+  const cls = g.dir === 'up' ? 'ema-up' : 'ema-down';
+  const ago = g.timeAgoText ? `<span class="ema-muted"> · ${g.timeAgoText}</span>` : '';
+  return `<span class="ema-cross ${cls}">${g.label}</span>${ago}`;
+}
+
+function ema56PosHtml(row) {
+  if (!row || !Number.isFinite(row.price) || !Number.isFinite(row.ema56)) {
+    return '<span class="ema-muted">--</span>';
+  }
+  const pulse = row.pulse || {};
+  const above = row.price > row.ema56;
+  const dist = distPctToEma56Safe(row.price, row.ema56);
+  const cross = pulse.closeCross56 === 'up'
+    ? '收盘反穿↑'
+    : pulse.closeCross56 === 'down'
+      ? '收盘跌破↓'
+      : (above ? '站上' : '跌破');
+  const cls = pulse.closeCross56 === 'up' || (above && !pulse.closeCross56) ? 'long' : 'short';
+  return `<span class="strategy-tag ${cls}">${cross}</span><span class="ema-meta">距EMA56 ${fmtDistPct(dist)}</span>`;
+}
+
+function distPctToEma56Safe(close, ema56) {
+  if (!Number.isFinite(close) || !Number.isFinite(ema56) || ema56 === 0) return null;
+  return (close / ema56 - 1) * 100;
+}
+
+function renderLtfCol(tf, row) {
+  const role = tfRoleLabel(tf);
   if (!row || !row.lastSignal) {
-    return `<div class="ema-tf-col is-empty"><div class="ema-tf-head"><span class="ema-tf">${tf}</span></div><div class="ema-empty">K线未返回</div></div>`;
+    return `<div class="ema-tf-col ema-ltf-col is-empty"><div class="ema-tf-head"><span class="ema-tf-id"><span class="ema-tf">${tf}</span><span class="ema-role">${role}</span></span></div><div class="ema-empty">K线未返回</div></div>`;
+  }
+  const dir = combinedDir(row);
+  const c = row.combined;
+  const reason = c && c.reason ? `<div class="ema-hint">${c.reason}</div>` : '';
+  const mk = row.macdKdj;
+  const mkLine = mk
+    ? `<span class="ema-meta">Hist ${formatMacdHist(mk.hist)} · KDJ ${Number.isFinite(mk.k) ? mk.k.toFixed(0) : '--'}/${Number.isFinite(mk.d) ? mk.d.toFixed(0) : '--'}/${Number.isFinite(mk.j) ? mk.j.toFixed(0) : '--'}</span>`
+    : '';
+  return `<div class="ema-tf-col ema-ltf-col dir-${dir}">
+    <div class="ema-tf-head">
+      <span class="ema-tf-id"><span class="ema-tf">${tf}</span><span class="ema-role">${role}</span></span>
+      ${combinedHtml(row)}
+    </div>
+    ${reason}
+    <div class="ema-metrics">
+      ${emaMetric('金叉', goldCrossHtml(row.goldCross))}
+      ${emaMetric('穿越', emaCrossHtml(row.lastSignal))}
+      ${emaMetric('分界', ema56PosHtml(row))}
+      ${emaMetric('布林', bbHtml(row.bb))}
+      ${row.bb ? emaMetric('轨道', bbRailsHtml(row.bb)) : ''}
+      ${mk ? emaMetric('MK', mkLine) : ''}
+      ${row.volume ? emaMetric('量', volHtml(row.volume)) : ''}
+    </div>
+  </div>`;
+}
+
+function renderEmaTfCol(tf, row) {
+  const role = tfRoleLabel(tf);
+  if (!row || !row.lastSignal) {
+    return `<div class="ema-tf-col is-empty"><div class="ema-tf-head"><span class="ema-tf-id"><span class="ema-tf">${tf}</span>${role ? `<span class="ema-role">${role}</span>` : ''}</span></div><div class="ema-empty">K线未返回</div></div>`;
   }
   const ls = row.lastSignal;
   const c = row.combined;
@@ -1514,7 +1744,7 @@ function renderEmaTfCol(tf, row) {
   // KC 建议已在 keltnerHtml 内完整展示，避免再重复贴一遍 hint
   return `<div class="ema-tf-col dir-${dir}">
     <div class="ema-tf-head">
-      <span class="ema-tf">${tf}</span>
+      <span class="ema-tf-id"><span class="ema-tf">${tf}</span>${role ? `<span class="ema-role">${role}</span>` : ''}</span>
       ${combinedHtml(row)}
     </div>
     ${reason}
@@ -1527,15 +1757,60 @@ function renderEmaTfCol(tf, row) {
       ${emaMetric('中轴', bollMidHtml(row.bollMid))}
       ${emaMetric('MK', macdKdjHtml(mk))}
       ${emaMetric('KC', keltnerHtml(kc))}
+      ${row.volume ? emaMetric('量', volHtml(row.volume)) : ''}
     </div>
     ${mkHint}${bbHint}${midHint}
   </div>`;
 }
 
+function renderQualPanel(data, coin) {
+  const forecast = evaluateTfForecast({
+    r1m: data && data['1m'] && data['1m'][coin],
+    r5m: data && data['5m'] && data['5m'][coin],
+    r15: data && data['15m'] && data['15m'][coin],
+    r1h: data && data['1h'] && data['1h'][coin],
+    h4: data && data['4h'] && data['4h'][coin],
+    d1: data && data['1d'] && data['1d'][coin],
+    w1: data && data['1w'] && data['1w'][coin],
+  });
+  if (!forecast) return '';
+  const badgeCls = forecast.badgeDir === 'long' ? 'long' : forecast.badgeDir === 'short' ? 'short' : 'watch';
+  const predCls = forecast.pred.dir === 'long' ? 'long' : forecast.pred.dir === 'short' ? 'short' : 'watch';
+  const rows = (forecast.checks || []).map((c) => {
+    const mark = c.pass === true ? '✓' : c.pass === false ? '✕' : '–';
+    const st = c.pass === true ? 'is-pass' : c.pass === false ? 'is-fail' : 'is-skip';
+    return `<div class="ema-qual-row ${st}">
+      <span class="ema-qual-mark" aria-hidden="true">${mark}</span>
+      <span class="ema-qual-name">${c.name}</span>
+      <span class="ema-qual-val">${c.detail || ''}</span>
+    </div>`;
+  }).join('');
+  const fail = forecast.failed && forecast.failed.length
+    ? `<div class="ema-qual-miss">未通过：${forecast.failed.join('、')}</div>`
+    : `<div class="ema-qual-miss is-ok">清单已通过 ${forecast.passN} 项</div>`;
+  return `<div class="ema-qual" aria-label="开仓资格">
+    <div class="ema-qual-head">
+      <span class="ema-qual-kicker">开仓资格</span>
+      <span class="strategy-tag ${badgeCls}">${forecast.badge}</span>
+      ${macdBarsHtml(data && data['1w'] && data['1w'][coin] && (data['1w'][coin].histSpark || (data['1w'][coin].weeklyMacd && data['1w'][coin].weeklyMacd.histSpark)))}
+      <span class="ema-qual-votes">${forecast.votes || ''}</span>
+    </div>
+    ${forecast.meta ? `<div class="ema-qual-meta">${forecast.meta}</div>` : ''}
+    <div class="ema-qual-list">${rows}</div>
+    <div class="ema-qual-pred">
+      <span class="strategy-tag ${predCls}">预测 ${forecast.pred.label}</span>
+      <span class="ema-qual-reason">${forecast.pred.reason}</span>
+    </div>
+    ${fail}
+  </div>`;
+}
+
 function renderOneEmaCard(data, coin, kind = 'fixed', meta = null) {
+  const r1m = data && data['1m'] && data['1m'][coin];
+  const r5m = data && data['5m'] && data['5m'][coin];
   const r15 = data && data['15m'] && data['15m'][coin];
   const r1h = data && data['1h'] && data['1h'][coin];
-  const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || '';
+  const px = (r15 && r15.priceText) || (r1h && r1h.priceText) || (r1m && r1m.priceText) || '';
   const d15 = combinedDir(r15);
   const d1h = combinedDir(r1h);
   const accent = d15 === d1h && d15 !== 'watch' ? d15 : (d1h !== 'watch' ? d1h : d15);
@@ -1567,14 +1842,23 @@ function renderOneEmaCard(data, coin, kind = 'fixed', meta = null) {
         </div>
       </div>
       <div class="ema-summary">
+        <div class="ema-summary-item"><span class="ema-tf">1m</span>${combinedHtml(r1m)}</div>
+        <div class="ema-summary-item"><span class="ema-tf">5m</span>${combinedHtml(r5m)}</div>
         <div class="ema-summary-item"><span class="ema-tf">15m</span>${combinedHtml(r15)}</div>
         <div class="ema-summary-item"><span class="ema-tf">1h</span>${combinedHtml(r1h)}</div>
       </div>
     </div>
     ${macdKdjBgHtml(data, coin)}
-    <div class="ema-tf-cols">
-      ${renderEmaTfCol('15m', r15)}
-      ${renderEmaTfCol('1h', r1h)}
+    ${renderQualPanel(data, coin)}
+    <div class="ema-tf-stack">
+      <div class="ema-tf-cols ema-ltf-cols">
+        ${renderLtfCol('1m', r1m)}
+        ${renderLtfCol('5m', r5m)}
+      </div>
+      <div class="ema-tf-cols">
+        ${renderEmaTfCol('15m', r15)}
+        ${renderEmaTfCol('1h', r1h)}
+      </div>
     </div>
   </article>`;
 }
@@ -1803,12 +2087,12 @@ async function loadEmaStrategy(force = false) {
       Object.entries(symbols).map(async ([coin, symbol]) => {
         try {
           // 4h/1d 用不那么长的序列即可
-          const klines = await getKlinesCached(symbol, interval, force, interval === '1d' ? 120 : 140);
-          const mk = macdKdjFromKlines(klines, coin, interval);
+          const klines = await getKlinesCached(symbol, interval, force, htfKlineLimit(interval));
+          const mk = htfFromKlines(klines, coin, interval);
           board[interval][coin] = mk;
           if (!mk) board.errors.push(coin + ' ' + interval + ': MACD+KDJ 不足');
           if (interval === '4h') {
-            const adx = evaluateAdx(klines, { interval: '4h' });
+            const adx = (mk && mk.adx) || evaluateAdx(klines, { interval: '4h' });
             if (adx) board.adx4h[coin] = adx;
           }
           board.cached = false;
@@ -1822,7 +2106,30 @@ async function loadEmaStrategy(force = false) {
         }
       }),
     );
-    await Promise.all([...execJobs, ...htfJobs]);
+    const execDone = Promise.all(execJobs);
+    const htfDone = Promise.all(htfJobs);
+    await execDone;
+    paintEmaBoard(board, { immediate: true });
+
+    const ltfJobs = LTF_INTERVALS.flatMap((interval) =>
+      Object.entries(symbols).map(async ([coin, symbol]) => {
+        try {
+          const klines = await getKlinesCached(symbol, interval, force, 160);
+          const row = ltfFromKlines(klines, coin, interval);
+          board[interval][coin] = row;
+          if (!row) board.errors.push(coin + ' ' + interval + ': 指标不足');
+          board.cached = false;
+          board.fetchedAt = Date.now();
+          paintEmaBoard(board);
+        } catch (e) {
+          if (!board[interval][coin]) {
+            board[interval][coin] = null;
+            board.errors.push(coin + ' ' + interval + ': ' + (e.message || e));
+          }
+        }
+      }),
+    );
+    await Promise.all([htfDone, Promise.all(ltfJobs)]);
     paintEmaBoard(board, { immediate: true, notify: true });
 
     if (!boardHasClientRows(board)) {
@@ -1908,43 +2215,7 @@ async function fetchFapiJson(path) {
 }
 
 async function fetchScalpKlines(symbol, force = false) {
-  const key = LS_KLINE + symbol + ':1m';
-  if (!force) {
-    const hit = lsGet(key, klineFreshMs('1m'));
-    if (hit) return hit;
-  }
-  const aliases = symbol === 'XAUUSDT' ? ['XAUUSDT', 'PAXGUSDT'] : [symbol];
-  const lim = 90;
-  const klines = await withKlineNetSlot(async () => {
-    let lastErr = null;
-    for (const sym of aliases) {
-      const urls = [
-        `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1m&limit=${lim}`,
-        `https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=1m&limit=${lim}`,
-        `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1m&limit=${lim}`,
-      ];
-      for (const url of urls) {
-        try {
-          const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-          if (res.status === 429 || res.status === 418) {
-            noteKlineRateLimit();
-            lastErr = new Error('klines 429');
-            await sleep(1600);
-            continue;
-          }
-          if (!res.ok) { lastErr = new Error('klines ' + res.status); continue; }
-          const data = await res.json();
-          if (Array.isArray(data) && data.length >= 40) return data;
-          lastErr = new Error('klines short');
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-    }
-    throw lastErr || new Error('1m ' + symbol);
-  });
-  lsSet(key, klines);
-  return klines;
+  return getKlinesCached(symbol, '1m', force, 160);
 }
 
 async function fetchScalpMeta(symbol, force = false) {
@@ -2641,6 +2912,7 @@ function overlayFromBoard(coin) {
     r1h: r1h || null,
     r4h: board['4h'] && board['4h'][k],
     r1d: board['1d'] && board['1d'][k],
+    r1w: board['1w'] && board['1w'][k],
     adx4h: board.adx4h && board.adx4h[k],
     detailsReady: !!(board['4h'] && board['4h'][k]),
   };
@@ -2762,7 +3034,7 @@ async function loadSignalStrategyCompact(sig) {
     r1h = rowFromKlines(k1h, coin, '1h');
   }
   if (!r15 && !r1h) throw new Error('指标不足');
-  return { symbol, r15, r1h, r4h: fromBoard && fromBoard.r4h, r1d: fromBoard && fromBoard.r1d, adx4h: fromBoard && fromBoard.adx4h, detailsReady: !!(fromBoard && fromBoard.detailsReady) };
+  return { symbol, r15, r1h, r4h: fromBoard && fromBoard.r4h, r1d: fromBoard && fromBoard.r1d, r1w: fromBoard && fromBoard.r1w, adx4h: fromBoard && fromBoard.adx4h, detailsReady: !!(fromBoard && fromBoard.detailsReady) };
 }
 
 async function loadSignalStrategyDetails(entry) {
@@ -2774,13 +3046,13 @@ async function loadSignalStrategyDetails(entry) {
     if (!symbol) throw new Error('no symbol');
     try {
       const k4h = await getKlinesCached(symbol, '4h', false, 140);
-      entry.r4h = macdKdjFromKlines(k4h, coin, '4h');
-      const adx = evaluateAdx(k4h, { interval: '4h' });
+      entry.r4h = htfFromKlines(k4h, coin, '4h');
+      const adx = (entry.r4h && entry.r4h.adx) || evaluateAdx(k4h, { interval: '4h' });
       if (adx) entry.adx4h = adx;
     } catch { /* 4h 可选 */ }
     try {
       const k1d = await getKlinesCached(symbol, '1d', false, 120);
-      entry.r1d = macdKdjFromKlines(k1d, coin, '1d');
+      entry.r1d = htfFromKlines(k1d, coin, '1d');
     } catch { /* 1d 可选 */ }
     enrichSignalOverlay(entry);
     entry.detailsReady = true;
@@ -2825,9 +3097,10 @@ function renderSignalStrategyDetails(entry) {
   if (!entry.detailsReady) {
     return '<div class="sig-strat-details"><div class="loading">加载策略详情…</div></div>';
   }
-  const board = { '4h': {}, '1d': {} };
+  const board = { '4h': {}, '1d': {}, '1w': {} };
   if (entry.r4h) board['4h'][entry.coin] = entry.r4h;
   if (entry.r1d) board['1d'][entry.coin] = entry.r1d;
+  if (entry.r1w) board['1w'][entry.coin] = entry.r1w;
   return `<div class="sig-strat-details">
     ${macdKdjBgHtml(board, entry.coin)}
     <div class="ema-tf-cols">

@@ -249,7 +249,7 @@ async function handleApi(request, env, ctx) {
     try {
       const live = await fetchStrategyBoard(usdtD, {
         includeUsdtD: false,
-        intervals: ['15m', '1h', '4h', '1d'],
+        intervals: ['15m', '1h', '4h', '1d', '1w'],
       });
       if (liveUsdt) live.usdtD = liveUsdt;
       const merged = mergeBoards(live, cached);

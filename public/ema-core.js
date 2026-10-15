@@ -16,14 +16,19 @@ const RSI_MIN = 30;
 const STOP_PCT = 2;
 const TAKE_PCT = 4;
 export const INTERVAL_MS = {
+  '1m': 60 * 1000,
+  '5m': 5 * 60 * 1000,
   '15m': 15 * 60 * 1000,
   '1h': 60 * 60 * 1000,
   '4h': 4 * 60 * 60 * 1000,
   '1d': 24 * 60 * 60 * 1000,
+  '1w': 7 * 24 * 60 * 60 * 1000,
 };
-const SETUP_LOOKBACK = { '15m': 16, '1h': 12 };
+const SETUP_LOOKBACK = { '1m': 20, '5m': 16, '15m': 16, '1h': 12 };
+export const LTF_INTERVALS = ['1m', '5m'];
 export const EXEC_INTERVALS = ['15m', '1h'];
-export const HTF_INTERVALS = ['4h', '1d'];
+export const HTF_INTERVALS = ['4h', '1d', '1w'];
+export const BOARD_INTERVALS = [...LTF_INTERVALS, ...EXEC_INTERVALS, ...HTF_INTERVALS];
 
 export function resampleLast(points, bucketMs) {
   const buckets = new Map();
@@ -155,10 +160,13 @@ function findLastCross(fast, slow, from) {
 }
 
 function barMinutes(interval) {
+  if (interval === '1m') return 1;
+  if (interval === '5m') return 5;
   if (interval === '15m') return 15;
   if (interval === '1h') return 60;
   if (interval === '4h') return 240;
   if (interval === '1d') return 1440;
+  if (interval === '1w') return 10080;
   return 60;
 }
 
@@ -327,6 +335,18 @@ export function evaluateMacdKdjSignal(klines, coin = '', opts = {}) {
     return null;
   }
 
+  let prevIdx = null;
+  for (let j = i - 1; j >= 0; j--) {
+    if (hist[j] != null && dif[j] != null && dea[j] != null) {
+      prevIdx = j;
+      break;
+    }
+  }
+  const histSpark = [];
+  for (let j = Math.max(0, n - 16); j < n; j++) {
+    if (hist[j] != null) histSpark.push(hist[j]);
+  }
+
   const macdBull = buyZone[i];
   const overboughtNow = sellZone[i];
   let state = 'watch';
@@ -377,6 +397,10 @@ export function evaluateMacdKdjSignal(klines, coin = '', opts = {}) {
     dif: dif[i],
     dea: dea[i],
     hist: hist[i],
+    histPrev: prevIdx != null ? hist[prevIdx] : null,
+    difPrev: prevIdx != null ? dif[prevIdx] : null,
+    deaPrev: prevIdx != null ? dea[prevIdx] : null,
+    histSpark,
     k: kArr[i],
     d: dArr[i],
     j: jArr[i],
@@ -1055,6 +1079,37 @@ export function evaluateBollinger(klines, coin = '', opts = {}) {
     if (pctB[j] == null || pctB[j] > 0.2) walkLower = false;
   }
 
+  const flipLook = Math.min(
+    interval === '1m' ? 90 : interval === '5m' ? 48 : 24,
+    Math.max(8, n - period),
+  );
+  let minP = Infinity;
+  let maxP = -Infinity;
+  let minJ = i;
+  let maxJ = i;
+  for (let j = i - flipLook + 1; j <= i; j++) {
+    if (pctB[j] == null) continue;
+    if (pctB[j] < minP) { minP = pctB[j]; minJ = j; }
+    if (pctB[j] > maxP) { maxP = pctB[j]; maxJ = j; }
+  }
+  let flip = null;
+  if (Number.isFinite(minP) && Number.isFinite(maxP) && minP <= 0.18 && maxP >= 0.82) {
+    if (minJ < maxJ && p >= 0.55) flip = 'up';
+    else if (maxJ < minJ && p <= 0.45) flip = 'down';
+  }
+
+  let recentSqueeze = false;
+  for (let j = i - 8; j <= i - 2; j++) {
+    if (j >= 0 && bw[j] != null && bw[j] <= q20) recentSqueeze = true;
+  }
+  const squeezeEnd = width === 'expand' && recentSqueeze;
+  const expandEnd = (bw[i] >= q80 && ch3 <= -0.08)
+    || (ch5 >= 0.08 && ch3 <= -0.06 && bw[i] >= q20);
+
+  const prevP = pctB[i - 1];
+  const reclaimLower = prevP != null && prevP < 0.08 && p >= 0.08 && closes[i] >= lower[i];
+  const loseUpper = prevP != null && prevP > 0.92 && p <= 0.92;
+
   let hint = '';
   if (width === 'squeeze' && (zone === 'mid' || zone === 'upperMid' || zone === 'lowerMid')) {
     hint = '闭口蓄势，等开口方向，先不追';
@@ -1079,6 +1134,16 @@ export function evaluateBollinger(klines, coin = '', opts = {}) {
   } else {
     hint = '观察开口方向';
   }
+  if (flip === 'up') hint = 'K线从下沿走到上沿，短线反弹特征。' + hint;
+  else if (flip === 'down') hint = 'K线从上沿打到下沿，短线回落特征。' + hint;
+  if (expandEnd) hint = '阔口结束。' + hint;
+  else if (squeezeEnd) hint = '收口结束、开始开口。' + hint;
+
+  let pathLabel = '';
+  if (flip === 'up') pathLabel = '一侧到另一侧↑';
+  else if (flip === 'down') pathLabel = '一侧到另一侧↓';
+  else if (expandEnd) pathLabel = '阔口结束';
+  else if (squeezeEnd) pathLabel = '收口结束·开口';
 
   return {
     coin,
@@ -1097,8 +1162,14 @@ export function evaluateBollinger(klines, coin = '', opts = {}) {
     zoneLabel,
     walkUpper,
     walkLower,
+    flip,
+    squeezeEnd,
+    expandEnd,
+    reclaimLower,
+    loseUpper,
+    pathLabel,
     hint,
-    label: `${widthLabel} · ${zoneLabel}`,
+    label: `${widthLabel} · ${zoneLabel}${pathLabel ? ' · ' + pathLabel : ''}`,
   };
 }
 
@@ -1848,9 +1919,768 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   // 先用本周期 ADX 算出状态机；看板 enrich 时再叠高周期过滤
   ema.keltner = evaluateDualKeltnerReversion(klines, ema.coin, { ...opts, adx: ema.adx });
   ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
+  ema.volume = evaluateVolumePulse(klines, { interval: opts.interval || '1h', volMaLen: 15 });
   // 迷你走势：最近收盘（用于卡片火花线，不删指标信息）
   const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
   ema.spark = closes.filter((v) => Number.isFinite(v)).slice(-48);
   return ema;
+}
+
+function distPctToEma56(close, ema56) {
+  if (!Number.isFinite(close) || !Number.isFinite(ema56) || ema56 === 0) return null;
+  return (close / ema56 - 1) * 100;
+}
+
+function htfMidState(ema, bb, distPct) {
+  if (!ema || distPct == null) {
+    return { midKind: 'neutral', midState: '中性' };
+  }
+  const z = bb && bb.zone;
+  if (distPct >= 1.2 && (z === 'upper' || z === 'above' || (bb && bb.walkUpper)) && ema.trend === 'long') {
+    return { midKind: 'strong', midState: '强势' };
+  }
+  if (distPct <= -1.2 && (z === 'lower' || z === 'below' || (bb && bb.walkLower))) {
+    return { midKind: 'oversold', midState: '超跌' };
+  }
+  if (ema.trend === 'long' && (distPct < 0.35 || z === 'mid' || z === 'lowerMid' || z === 'lower')) {
+    return { midKind: 'weakening', midState: '走弱' };
+  }
+  if (ema.trend === 'short' && distPct < 0) {
+    return { midKind: 'weak', midState: '偏弱' };
+  }
+  if (ema.trend === 'long') return { midKind: 'firm', midState: '偏强' };
+  if (ema.trend === 'short') return { midKind: 'soft', midState: '偏空' };
+  return { midKind: 'neutral', midState: '中性' };
+}
+
+function klineVol(row) {
+  if (!row) return null;
+  if (Array.isArray(row)) {
+    const base = Number(row[5]);
+    const quote = Number(row[7]);
+    return { base, quote };
+  }
+  return { base: Number(row.v || row.volume), quote: Number(row.q || row.quoteVolume) };
+}
+
+/**
+ * 成交量：上一根已收盘 vs 前 N 根均量。不另拉接口，用 K 线自带量。
+ */
+export function evaluateVolumePulse(klines, opts = {}) {
+  const period = Math.max(intParam(opts.volMaLen, 20), 4);
+  const interval = opts.interval || '1h';
+  if (!klines || klines.length < period + 2) return null;
+  const n = klines.length;
+  const closed = n - 2;
+  if (closed < 1) return null;
+  let sum = 0;
+  let cnt = 0;
+  const from = Math.max(0, closed - period);
+  for (let j = from; j < closed; j++) {
+    const v = klineVol(klines[j]);
+    if (v && Number.isFinite(v.base) && v.base > 0) {
+      sum += v.base;
+      cnt += 1;
+    }
+  }
+  const ma = cnt ? sum / cnt : null;
+  const closedV = klineVol(klines[closed]);
+  const nowV = klineVol(klines[n - 1]);
+  const volClosed = closedV && Number.isFinite(closedV.base) ? closedV.base : null;
+  const volNow = nowV && Number.isFinite(nowV.base) ? nowV.base : null;
+  const quoteClosed = closedV && Number.isFinite(closedV.quote) ? closedV.quote : null;
+  const ratio = ma > 0 && volClosed != null ? volClosed / ma : null;
+  let kind = 'avg';
+  let label = '均量';
+  if (ratio != null) {
+    if (ratio >= 1.4) { kind = 'high'; label = '放量'; }
+    else if (ratio >= 1.15) { kind = 'high'; label = '温和放量'; }
+    else if (ratio <= 0.6) { kind = 'low'; label = '缩量'; }
+    else if (ratio <= 0.85) { kind = 'low'; label = '略缩'; }
+  }
+  return {
+    interval,
+    period,
+    volClosed,
+    volNow,
+    volMa: ma,
+    quoteClosed,
+    ratio,
+    kind,
+    label,
+  };
+}
+
+export function formatMacdHist(h) {
+  if (!Number.isFinite(h)) return '--';
+  const a = Math.abs(h);
+  let body;
+  if (a >= 100) body = a.toFixed(0);
+  else if (a >= 10) body = a.toFixed(1);
+  else if (a >= 1) body = a.toFixed(2);
+  else body = a.toPrecision(3);
+  if (h > 0) return '+' + body;
+  if (h < 0) return '-' + body;
+  return body;
+}
+
+function histText(h) {
+  return formatMacdHist(h);
+}
+
+function weeklyMacdBiasFromMk(mk) {
+  const closed = Number.isFinite(mk && mk.histPrev) ? mk.histPrev : (mk && mk.hist);
+  const forming = mk && mk.hist;
+  let bias = 'watch';
+  let biasLabel = '周线持平';
+  let stance = 'both';
+  let stanceLabel = '两边都做';
+  if (closed > 0) {
+    bias = 'long';
+    biasLabel = '偏多';
+    stance = 'long-only';
+    stanceLabel = '偏多·只开多';
+  } else if (closed < 0) {
+    bias = 'short';
+    biasLabel = '偏空';
+    stance = 'short-only';
+    stanceLabel = '偏空·只开空';
+  }
+  return {
+    closedHist: closed,
+    formingHist: forming,
+    closedDif: mk && mk.difPrev,
+    formingDif: mk && mk.dif,
+    bias,
+    biasLabel,
+    stance,
+    stanceLabel,
+    histSpark: mk && mk.histSpark,
+  };
+}
+
+function htfStance(ema, mk, adx) {
+  const trendAdx = adx && adx.regime === 'trend';
+  const rangeAdx = adx && adx.regime === 'range';
+  const macdBull = !!(mk && mk.macdBull);
+  if (trendAdx && ema && ema.trend === 'long' && macdBull) {
+    return { stance: 'long-only', stanceLabel: '只做多' };
+  }
+  if (trendAdx && ema && ema.trend === 'short' && !macdBull) {
+    return { stance: 'short-only', stanceLabel: '只做空' };
+  }
+  if (rangeAdx) {
+    return { stance: 'both', stanceLabel: '震荡·两边都做' };
+  }
+  if (ema && ema.trend === 'long' && macdBull) {
+    return { stance: 'long-bias', stanceLabel: '偏多' };
+  }
+  if (ema && ema.trend === 'short' && !macdBull) {
+    return { stance: 'short-bias', stanceLabel: '偏空' };
+  }
+  return { stance: 'both', stanceLabel: '两边都做' };
+}
+
+/**
+ * 4h / 1d / 1w 背景：在 MACD+KDJ 上叠 EMA56 距离、布林、ADX，定只做多/只做空/两边都做。
+ * 不删 MK 原字段。
+ */
+export function evaluateHtfContext(klines, coin = '', opts = {}) {
+  const interval = opts.interval || '4h';
+  const mk = evaluateMacdKdjSignal(klines, coin, opts);
+  if (!mk) return null;
+  const ema = evaluateEmaTrendStrategy(klines, coin, opts);
+  const bb = evaluateBollinger(klines, coin, opts);
+  const adx = evaluateAdx(klines, opts);
+  const distPct = ema ? distPctToEma56(ema.price, ema.ema56) : null;
+  const mid = htfMidState(ema, bb, distPct);
+  const vol = evaluateVolumePulse(klines, { interval, volMaLen: 20 });
+  let st = htfStance(ema, mk, adx);
+  let weeklyMacd = null;
+  if (interval === '1w') {
+    weeklyMacd = weeklyMacdBiasFromMk(mk);
+    st = { stance: weeklyMacd.stance, stanceLabel: weeklyMacd.stanceLabel };
+  }
+  mk.htf = {
+    interval,
+    distPct,
+    ...mid,
+    ...st,
+    emaTrend: ema ? ema.trend : null,
+    emaTrendLabel: ema ? ema.trendLabel : '',
+    price: ema ? ema.price : null,
+    ema56: ema ? ema.ema56 : null,
+    bb,
+    adx,
+    weeklyMacd,
+    volume: vol,
+  };
+  mk.adx = adx;
+  mk.volume = vol;
+  mk.weeklyMacd = weeklyMacd;
+  return mk;
+}
+
+function goldCrossFromKlines(klines, interval) {
+  const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
+  const ema7 = calcEMA(closes, 7);
+  const ema21 = calcEMA(closes, 21);
+  const ema56 = calcEMA(closes, 56);
+  if (!ema7 || !ema21) return { closes, ema7, ema21, ema56, last21: null, closeCross56: null };
+  const i = closes.length - 1;
+  const last21 = findLastCross(ema7, ema21, i);
+  let closeCross56 = null;
+  if (ema56 && i > 0 && ema56[i] != null && ema56[i - 1] != null) {
+    if (closes[i - 1] <= ema56[i - 1] && closes[i] > ema56[i]) closeCross56 = 'up';
+    else if (closes[i - 1] >= ema56[i - 1] && closes[i] < ema56[i]) closeCross56 = 'down';
+  }
+  return { closes, ema7, ema21, ema56, last21, closeCross56, index: i };
+}
+
+function buildLtfPulse(interval, ema, bb, gold, closeCross56, distPct) {
+  const is1m = interval === '1m';
+  const goldLook = is1m ? 45 : 18;
+  const goldUp = !!(gold && gold.dir === 'up' && gold.barsAgo != null && gold.barsAgo <= goldLook);
+  const goldDn = !!(gold && gold.dir === 'down' && gold.barsAgo != null && gold.barsAgo <= goldLook);
+  const flipUp = !!(bb && bb.flip === 'up');
+  const flipDn = !!(bb && bb.flip === 'down');
+  const expandEnd = !!(bb && bb.expandEnd);
+  const squeezeEnd = !!(bb && bb.squeezeEnd);
+  const reclaim = !!(bb && bb.reclaimLower);
+  const rejectUp = !!(bb && bb.loseUpper);
+  const standAbove56 = !!(ema && Number.isFinite(ema.price) && Number.isFinite(ema.ema56) && ema.price > ema.ema56);
+
+  let dir = 'watch';
+  let kind = 'idle';
+  let label = '观望';
+  const reasons = [];
+
+  if (flipUp && goldUp) {
+    dir = 'long';
+    kind = 'rebound';
+    label = '反弹·金叉';
+    reasons.push(`金叉后 K 线从布林一侧走到另一侧，短线偏反弹（${gold.timeAgoText}）`);
+  } else if (flipUp) {
+    dir = 'long';
+    kind = 'rebound';
+    label = '反弹·一侧到另一侧';
+    reasons.push('价格从布林下沿扫到上沿，短线反弹特征');
+  } else if (flipDn && goldDn) {
+    dir = 'short';
+    kind = 'dump';
+    label = '回落·死叉';
+    reasons.push(`死叉后 K 线从上沿打到下沿（${gold.timeAgoText}）`);
+  } else if (flipDn) {
+    dir = 'short';
+    kind = 'dump';
+    label = '回落·一侧到另一侧';
+    reasons.push('价格从布林上沿扫到下沿');
+  } else if (closeCross56 === 'up') {
+    dir = 'long';
+    kind = 'trigger';
+    label = reclaim ? '触发·反穿并站回下轨' : '触发·收盘反穿EMA56';
+    reasons.push(reclaim ? '收盘反穿 EMA56，并站回布林下轨，可作开仓时点' : '收盘反穿 EMA56，短线触发');
+  } else if (closeCross56 === 'down') {
+    dir = 'short';
+    kind = 'trigger';
+    label = '触发·收盘跌破EMA56';
+    reasons.push('收盘跌破 EMA56，短线触发/止盈时点');
+  } else if (reclaim && standAbove56) {
+    dir = 'long';
+    kind = 'trigger';
+    label = '触发·站回下轨';
+    reasons.push('站回布林下轨，短线可作开仓或止盈时点');
+  } else if (rejectUp) {
+    dir = 'short';
+    kind = 'trigger';
+    label = '触发·上轨回落';
+    reasons.push('从上轨回落，短线减多/看回中轨');
+  } else if (standAbove56 && ema.trend === 'long') {
+    dir = 'long';
+    kind = 'bias';
+    label = '站上EMA56';
+    reasons.push('价格在 EMA56 上方，7/21 多头排列');
+  } else if (!standAbove56 && ema && ema.trend === 'short') {
+    dir = 'short';
+    kind = 'bias';
+    label = 'EMA56下方';
+    reasons.push('价格在 EMA56 下方，7/21 空头排列');
+  } else if (goldUp) {
+    dir = 'long';
+    kind = 'bias';
+    label = '金叉后';
+    reasons.push(`7/21 金叉（${gold.timeAgoText}），等收盘站稳或布林确认`);
+  } else if (goldDn) {
+    dir = 'short';
+    kind = 'bias';
+    label = '死叉后';
+    reasons.push(`7/21 死叉（${gold.timeAgoText}）`);
+  }
+
+  if (expandEnd) reasons.push('布林阔口结束，波动从极端回到收敛，不宜追突破');
+  if (squeezeEnd) reasons.push('布林收口结束、开始开口，等方向确认');
+  if (is1m && (kind === 'trigger' || kind === 'rebound')) {
+    reasons.push('1m 只作触发，需 5m 跟上再动手');
+  }
+
+  return {
+    role: is1m ? 'trigger' : 'confirm',
+    dir,
+    kind,
+    label,
+    baseLabel: label,
+    reason: reasons.join('。') || (is1m ? '等待收盘反穿 EMA56 或站回下轨' : '等待跟上 1m 方向'),
+    baseReason: reasons.join('。') || (is1m ? '等待收盘反穿 EMA56 或站回下轨' : '等待跟上 1m 方向'),
+    goldUp,
+    goldDn,
+    flipUp,
+    flipDn,
+    expandEnd,
+    squeezeEnd,
+    reclaim,
+    closeCross56,
+    standAbove56,
+    distPct,
+    awaitConfirm: false,
+  };
+}
+
+/**
+ * 1m 触发 / 5m 确认。不算 AT / 中轴 / Keltner，避免 1m 噪音改写共振。
+ */
+export function evaluateLtfPulse(klines, coin = '', opts = {}) {
+  const interval = opts.interval || '1m';
+  const ema = evaluateEmaTrendStrategy(klines, coin, opts);
+  if (!ema) return null;
+  const bb = evaluateBollinger(klines, coin, opts);
+  const adx = evaluateAdx(klines, opts);
+  const mk = evaluateMacdKdjSignal(klines, coin, opts);
+  const g = goldCrossFromKlines(klines, interval);
+  const i = g.index;
+  let gold = null;
+  if (g.last21) {
+    gold = {
+      dir: g.last21.dir,
+      label: g.last21.dir === 'up' ? '金叉7/21' : '死叉7/21',
+      barsAgo: i - g.last21.index,
+      timeAgoText: formatAgo(i - g.last21.index, interval),
+    };
+  }
+  const distPct = distPctToEma56(ema.price, ema.ema56);
+  const pulse = buildLtfPulse(interval, ema, bb, gold, g.closeCross56, distPct);
+  ema.bb = bb;
+  ema.adx = adx;
+  ema.macdKdj = mk;
+  ema.goldCross = gold;
+  ema.pulse = pulse;
+  ema.combined = { dir: pulse.dir, label: pulse.label, reason: pulse.reason };
+  const closes = g.closes.filter((v) => Number.isFinite(v));
+  ema.spark = closes.slice(-48);
+  ema.volume = evaluateVolumePulse(klines, { interval, volMaLen: 20 });
+  ema.ltf = true;
+  return ema;
+}
+
+/** 5m 是否跟上 1m；幂等，可重复 enrich。 */
+export function annotateLtfPair(row1m, row5m) {
+  if (!row1m || !row1m.pulse) return { row1m, row5m };
+  const d1 = row1m.pulse.dir;
+  const p1 = row1m.pulse;
+  p1.awaitConfirm = false;
+  row1m.combined = { dir: p1.dir, label: p1.baseLabel, reason: p1.baseReason };
+
+  if (!row5m || !row5m.pulse) return { row1m, row5m };
+  const d5 = row5m.pulse.dir;
+  let confirm = 'watch';
+  let confirmLabel = row5m.pulse.baseLabel || '观望';
+  let confirmReason = row5m.pulse.baseReason || '等待跟上 1m 方向';
+
+  if (d1 === 'long' || d1 === 'short') {
+    const word = d1 === 'long' ? '多' : '空';
+    if (d5 === d1) {
+      confirm = d1;
+      confirmLabel = d1 === 'long' ? '跟上·偏多' : '跟上·偏空';
+      confirmReason = `5m 方向与 1m ${word}一致，可作确认`;
+    } else if (d5 === 'watch') {
+      confirm = 'watch';
+      confirmLabel = '尚未跟上';
+      confirmReason = `1m 已偏${word}，5m 还没跟上`;
+      p1.awaitConfirm = true;
+    } else {
+      confirm = 'watch';
+      confirmLabel = '方向不一致';
+      confirmReason = `1m 偏${word}，5m 反向，降权`;
+      p1.awaitConfirm = true;
+    }
+  }
+
+  row5m.pulse = { ...row5m.pulse, confirm, confirmLabel, confirmReason };
+  row5m.combined = { dir: confirm === 'watch' ? (d5 === 'long' || d5 === 'short' ? d5 : 'watch') : confirm, label: confirmLabel, reason: confirmReason };
+
+  if (p1.awaitConfirm && (p1.kind === 'trigger' || p1.kind === 'rebound')) {
+    row1m.combined = {
+      dir: p1.dir,
+      label: `${p1.baseLabel}·等5m`,
+      reason: `${p1.baseReason}；等 5m 跟上再动手`,
+    };
+  }
+  return { row1m, row5m };
+}
+
+export function enrichBoardLtf(board, coins) {
+  if (!board) return board;
+  const keys = coins || Object.keys(STRATEGY_SYMBOLS);
+  for (const coin of keys) {
+    const r1 = board['1m'] && board['1m'][coin];
+    const r5 = board['5m'] && board['5m'][coin];
+    if (!r1 && !r5) continue;
+    const next = annotateLtfPair(r1, r5);
+    if (next.row1m) board['1m'][coin] = next.row1m;
+    if (next.row5m) board['5m'][coin] = next.row5m;
+  }
+  return board;
+}
+
+function execDir(row) {
+  const d = row && row.combined && row.combined.dir;
+  if (d === 'long' || d === 'short') return d;
+  if (row && row.alpha && row.alpha.bull) return 'long';
+  if (row && row.alpha && row.alpha.bear) return 'short';
+  return 'watch';
+}
+
+function ltfDir(row) {
+  const d = row && row.pulse && row.pulse.dir;
+  if (d === 'long' || d === 'short') return d;
+  return 'watch';
+}
+
+function htfStanceOf(row) {
+  if (row && row.htf && row.htf.stance) return row.htf.stance;
+  if (!row || !row.ready) return null;
+  return row.macdBull ? 'long-bias' : 'short-bias';
+}
+
+function htfMidOf(row) {
+  return (row && row.htf && row.htf.midKind) || null;
+}
+
+function voteFromStance(stance) {
+  if (stance === 'long-only' || stance === 'long-bias') return 'long';
+  if (stance === 'short-only' || stance === 'short-bias') return 'short';
+  return 'watch';
+}
+
+function fmtPctSigned(n, digits = 2) {
+  if (!Number.isFinite(n)) return '--';
+  const sign = n > 0 ? '+' : '';
+  return sign + n.toFixed(digits) + '%';
+}
+
+function stanceAllows(stance, dir) {
+  if (!stance) return { pass: null, hard: false, detail: '未就绪' };
+  if (stance === 'both') return { pass: true, hard: false, detail: '两边都做' };
+  if (stance === 'long-only') {
+    return dir === 'long'
+      ? { pass: true, hard: false, detail: '只做多' }
+      : { pass: false, hard: true, detail: '只做多' };
+  }
+  if (stance === 'short-only') {
+    return dir === 'short'
+      ? { pass: true, hard: false, detail: '只做空' }
+      : { pass: false, hard: true, detail: '只做空' };
+  }
+  if (stance === 'long-bias') {
+    return dir === 'long'
+      ? { pass: true, hard: false, detail: '偏多' }
+      : { pass: false, hard: false, detail: '偏多' };
+  }
+  if (stance === 'short-bias') {
+    return dir === 'short'
+      ? { pass: true, hard: false, detail: '偏空' }
+      : { pass: false, hard: false, detail: '偏空' };
+  }
+  return { pass: true, hard: false, detail: '两边都做' };
+}
+
+function mkHistText(row) {
+  if (!row || !Number.isFinite(row.hist)) return 'Hist --';
+  return `柱 ${formatMacdHist(row.hist)}`;
+}
+
+/**
+ * 多周期对照 → 开仓资格清单 + 预测。不改写共振。
+ */
+export function evaluateTfForecast(input) {
+  const { r1m, r5m, r15, r1h, h4, d1, w1 } = input || {};
+  const hasCore = !!(r15 || r1h || d1 || h4);
+  if (!hasCore) return null;
+
+  const d1m = ltfDir(r1m);
+  const d5m = ltfDir(r5m);
+  const d15 = execDir(r15);
+  const d1h = execDir(r1h);
+  const stW = htfStanceOf(w1);
+  const stD = htfStanceOf(d1);
+  const st4 = htfStanceOf(h4);
+  const vW = voteFromStance(stW);
+  const vD = voteFromStance(stD);
+  const v4 = voteFromStance(st4);
+  const mid4 = htfMidOf(h4);
+  const pulse1 = r1m && r1m.pulse;
+  const confirm5 = r5m && r5m.pulse && r5m.pulse.confirm;
+
+  let longVotes = 0;
+  let shortVotes = 0;
+  const addVote = (d) => {
+    if (d === 'long') longVotes += 1;
+    else if (d === 'short') shortVotes += 1;
+  };
+  addVote(vW);
+  addVote(vD);
+  addVote(v4);
+  addVote(d1h);
+  addVote(d15);
+  addVote(d5m);
+  addVote(d1m);
+  if (mid4 === 'oversold') longVotes += 1;
+  if (mid4 === 'strong' || mid4 === 'firm') longVotes += 1;
+  if (mid4 === 'weak' || mid4 === 'soft' || mid4 === 'weakening') shortVotes += 1;
+
+  const reboundLong = d1m === 'long' && (pulse1 && (pulse1.kind === 'rebound' || pulse1.kind === 'trigger'))
+    && (mid4 === 'oversold' || mid4 === 'weak' || vD === 'short' || v4 === 'short');
+  const dumpShort = d1m === 'short' && (pulse1 && (pulse1.kind === 'dump' || pulse1.kind === 'trigger'))
+    && (mid4 === 'strong' || mid4 === 'firm' || vD === 'long' || v4 === 'long');
+
+  let side = 'watch';
+  let badge = '震荡';
+  if (reboundLong) {
+    side = 'long';
+    badge = '反弹';
+  } else if (dumpShort) {
+    side = 'short';
+    badge = '回落';
+  } else if (d1m !== 'watch' && (d5m === d1m || confirm5 === d1m) && (d1h === d1m || d15 === d1m || vD === d1m)) {
+    side = d1m;
+    badge = (vD === d1m && (mid4 === 'strong' || mid4 === 'firm' || mid4 === 'weak' || mid4 === 'soft'))
+      ? (d1m === 'long' ? '强多' : '强空')
+      : (d1m === 'long' ? '偏多' : '偏空');
+  } else if (d1h !== 'watch' && (vD === d1h || v4 === d1h)) {
+    side = d1h;
+    badge = d1h === 'long' ? '偏多' : '偏空';
+  } else if (longVotes > shortVotes + 1) {
+    side = 'long';
+    badge = '偏多';
+  } else if (shortVotes > longVotes + 1) {
+    side = 'short';
+    badge = '偏空';
+  } else {
+    side = longVotes >= shortVotes ? 'long' : 'short';
+    badge = '震荡';
+  }
+
+  const dirWord = side === 'long' ? '多' : '空';
+  const checks = [];
+  const push = (id, name, pass, detail, hard = false) => {
+    checks.push({ id, name, pass, detail: detail || '', hard: !!hard });
+  };
+
+  const aW = stanceAllows(stW, side);
+  const wMacd = w1 && (w1.weeklyMacd || (w1.htf && w1.htf.weeklyMacd));
+  const wVol = w1 && (w1.volume || (w1.htf && w1.htf.volume));
+  let wDetail = aW.detail;
+  if (wMacd) {
+    wDetail = `上周柱 ${histText(wMacd.closedHist)} · ${wMacd.stanceLabel}`;
+    if (Number.isFinite(wMacd.formingHist)) wDetail += ` · 本周柱 ${histText(wMacd.formingHist)}未收`;
+  }
+  if (wVol && wVol.label) {
+    wDetail += ` · 周量${wVol.label}${Number.isFinite(wVol.ratio) ? ' ' + wVol.ratio.toFixed(2) + 'x' : ''}`;
+  }
+  push('1w', '1w 周线MACD', aW.pass, wDetail, aW.hard);
+  const aD = stanceAllows(stD, side);
+  const dDetail = d1
+    ? `${aD.detail} · ${d1.macdBull ? '日线多头' : '日线空头'} · ${mkHistText(d1)}`
+    : '未就绪';
+  push('1d', '1d 环境允许', aD.pass, dDetail, aD.hard);
+
+  let midPass = null;
+  let midDetail = '未就绪';
+  let midHard = false;
+  if (h4 && h4.htf) {
+    const dist = Number.isFinite(h4.htf.distPct) ? `距EMA56 ${fmtPctSigned(h4.htf.distPct)}` : '';
+    const zone = h4.htf.bb ? h4.htf.bb.zoneLabel : '';
+    midDetail = [h4.htf.midState, dist, zone, mkHistText(h4)].filter(Boolean).join(' · ');
+    if (side === 'long') {
+      midPass = mid4 === 'oversold' || mid4 === 'weakening' || mid4 === 'firm' || mid4 === 'strong' || mid4 === 'neutral';
+      if (mid4 === 'weak' || mid4 === 'soft') midPass = reboundLong;
+    } else {
+      midPass = mid4 === 'strong' || mid4 === 'firm' || mid4 === 'weakening' || mid4 === 'weak' || mid4 === 'soft' || mid4 === 'neutral';
+      if (mid4 === 'oversold') midPass = dumpShort;
+    }
+  }
+  push('4h', '4h 中期配合', midPass, midDetail, midHard);
+
+  const h1Label = r1h && r1h.combined ? r1h.combined.label : '未就绪';
+  const h1Pass = !r1h ? null : d1h === side ? true : d1h === 'watch' ? false : (reboundLong || dumpShort);
+  push('1h', '1h 结构同向', h1Pass, d1h === 'watch' ? `${h1Label}` : `${side === d1h ? '同向' : '反向'} · ${h1Label}`);
+
+  const m15Label = r15 && r15.combined ? r15.combined.label : '未就绪';
+  let m15Pass = !r15 ? null : d15 === side;
+  if (r15 && d15 === 'watch' && r15.bb) {
+    const z = r15.bb.zone;
+    if (side === 'long' && (z === 'lower' || z === 'below' || z === 'lowerMid' || r15.bb.reclaimLower)) m15Pass = true;
+    if (side === 'short' && (z === 'upper' || z === 'above' || z === 'upperMid' || r15.bb.loseUpper)) m15Pass = true;
+  }
+  const m15Detail = r15 && r15.bb
+    ? `${d15 === 'watch' ? '无方向' : (d15 === side ? '同向' : '反向')} · ${r15.bb.label}`
+    : m15Label;
+  push('15m', '15m 结构', m15Pass, m15Detail);
+
+  const p5Pass = !r5m ? null
+    : (confirm5 === side || d5m === side);
+  const p5Label = r5m && r5m.combined ? r5m.combined.label : '未就绪';
+  push('5m', '5m 跟上 1m', p5Pass, p5Label);
+
+  const t1Pass = !r1m ? null
+    : d1m === side && pulse1 && (pulse1.kind === 'trigger' || pulse1.kind === 'rebound' || pulse1.kind === 'dump' || pulse1.kind === 'bias');
+  const t1HardNeed = pulse1 && (pulse1.kind === 'trigger' || pulse1.kind === 'rebound' || pulse1.kind === 'dump');
+  const t1Label = r1m && r1m.combined ? r1m.combined.label : '未就绪';
+  push('1m', '1m 触发', t1Pass, t1Label);
+
+  const bbRow = r15 || r1h;
+  let bbPass = null;
+  let bbDetail = '未就绪';
+  if (bbRow && bbRow.bb) {
+    bbDetail = bbRow.bb.label;
+    if (bbRow.bb.width === 'squeeze') {
+      bbPass = false;
+      bbDetail = `${bbRow.bb.widthLabel} · 闭口不追`;
+    } else {
+      bbPass = true;
+      if (bbRow.bb.expandEnd) bbDetail += ' · 阔口结束';
+      if (bbRow.bb.squeezeEnd) bbDetail += ' · 收口结束开口';
+    }
+  }
+  push('bb', '布林可动手', bbPass, bbDetail);
+
+  let alignPass = null;
+  let alignDetail = '未就绪';
+  if (r1m || r1h) {
+    if (d1h === 'watch' && d1m === 'watch') {
+      alignPass = false;
+      alignDetail = '1h/1m 都无方向';
+    } else if (d1h === 'watch') {
+      alignPass = false;
+      alignDetail = `1h 无方向，1m ${d1m === 'long' ? '多' : d1m === 'short' ? '空' : '平'}`;
+    } else if (d1m === 'watch') {
+      alignPass = false;
+      alignDetail = `1h ${d1h === 'long' ? '多' : '空'}，1m 未触发`;
+    } else if (d1h === d1m) {
+      alignPass = true;
+      alignDetail = `顺势 ${d1m === 'long' ? '多' : '空'}`;
+    } else if (reboundLong || dumpShort) {
+      alignPass = true;
+      alignDetail = d1m === 'long' ? '1h空/1m多 · 逆势反弹' : '1h多/1m空 · 逆势回落';
+    } else {
+      alignPass = false;
+      alignDetail = `1h ${d1h === 'long' ? '多' : '空'} vs 1m ${d1m === 'long' ? '多' : '空'}`;
+    }
+  }
+  push('align', '周期对齐', alignPass, alignDetail);
+
+  const failed = checks.filter((c) => c.pass === false).map((c) => c.name);
+  const hardBlock = checks.some((c) => c.pass === false && c.hard);
+  const passN = checks.filter((c) => c.pass === true).length;
+  const knownN = checks.filter((c) => c.pass === true || c.pass === false).length;
+  const trigOk = t1Pass === true && t1HardNeed;
+  const confOk = p5Pass === true;
+  const bbOk = bbPass !== false;
+
+  let predDir = 'watch';
+  let predLabel = '观望';
+  let predReason = '多周期尚未对齐，先不当开仓。';
+
+  if (side === 'watch') {
+    predLabel = '观望';
+    predReason = '多空票数接近，当震荡处理。';
+  } else if (trigOk && confOk && bbOk && !hardBlock && h1Pass) {
+    predDir = side;
+    predLabel = side === 'long' ? '试多' : '试空';
+    predReason = `1m 触发且 5m 跟上，${dirWord}向结构同向。`;
+    if (badge === '反弹' || badge === '回落') {
+      predLabel = side === 'long' ? '轻仓试多' : '轻仓试空';
+      predReason = badge === '反弹'
+        ? '大周期偏空/超跌，1m 反弹只作轻仓或空单止盈。'
+        : '大周期偏多，1m 回落只作轻仓或多单止盈。';
+    }
+  } else if (trigOk && confOk && (reboundLong || dumpShort)) {
+    predDir = side;
+    predLabel = side === 'long' ? '轻仓试多' : '轻仓试空';
+    predReason = hardBlock
+      ? `背景${aW.detail || aD.detail}，1m 形态只能轻仓。`
+      : (reboundLong ? '超跌/空头背景下的 1m 反弹。' : '强势/多头背景下的 1m 回落。');
+  } else if (trigOk && !confOk) {
+    predLabel = '等5m确认';
+    predReason = `1m 已偏${dirWord}，等 5m 跟上再动手。`;
+  } else if (!trigOk && (h1Pass || m15Pass) && (aD.pass || aW.pass) && !hardBlock) {
+    predLabel = '等1m触发';
+    predReason = `大周期允许做${dirWord}，等 1m 收盘反穿 EMA56 或站回布林。`;
+  } else if (bbPass === false) {
+    predLabel = '闭口观望';
+    predReason = '布林收口，即使方向对也不追。';
+  } else if (hardBlock) {
+    predLabel = '方向受限';
+    predReason = `背景${stD === 'long-only' || stW === 'long-only' ? '只做多' : '只做空'}，反向单不做。`;
+  }
+
+  const distSrc = r15 || r1h || r1m;
+  const distPct = distSrc && Number.isFinite(distSrc.price) && Number.isFinite(distSrc.ema56)
+    ? (distSrc.price / distSrc.ema56 - 1) * 100
+    : (h4 && h4.htf && h4.htf.distPct);
+  const adxSrc = (r1h && r1h.adx) || (h4 && (h4.htf && h4.htf.adx || h4.adx));
+  const bbSrc = (r15 && r15.bb) || (r1h && r1h.bb);
+  const volSrc = (r15 && r15.volume) || (r1h && r1h.volume) || (r5m && r5m.volume);
+  const metaBits = [
+    Number.isFinite(distPct) ? `dist ${fmtPctSigned(distPct)}` : null,
+    adxSrc && Number.isFinite(adxSrc.adx) ? `ADX ${adxSrc.adx.toFixed(1)}` : null,
+    bbSrc && Number.isFinite(bbSrc.bandwidthPct) ? `带宽 ${bbSrc.bandwidthPct.toFixed(2)}%` : null,
+    bbSrc && Number.isFinite(bbSrc.pctB) ? `布林位置 ${(bbSrc.pctB * 100).toFixed(0)}%` : null,
+    volSrc && volSrc.label
+      ? `量 ${volSrc.label}${Number.isFinite(volSrc.ratio) ? ' ' + volSrc.ratio.toFixed(2) + 'x' : ''}`
+      : null,
+    wMacd && Number.isFinite(wMacd.closedHist) ? `周柱 ${histText(wMacd.closedHist)}` : null,
+  ].filter(Boolean);
+
+  const mark = (d, stance) => {
+    if (stance === 'both') return '双';
+    if (d === 'long') return '多';
+    if (d === 'short') return '空';
+    return '平';
+  };
+  const voteBits = [
+    w1 ? `1w${mark(vW, stW)}` : null,
+    d1 ? `1d${mark(vD, stD)}` : null,
+    h4 ? `4h${h4.htf && h4.htf.midState ? h4.htf.midState : mark(v4, st4)}` : null,
+    r1h ? `1h${mark(d1h)}` : null,
+    r15 ? `15m${mark(d15)}` : null,
+    r5m ? `5m${mark(d5m)}` : null,
+    r1m ? `1m${mark(d1m)}` : null,
+  ].filter(Boolean);
+
+  return {
+    ready: true,
+    side,
+    badge,
+    badgeDir: side === 'watch' ? 'watch' : side,
+    meta: metaBits.join(' · '),
+    votes: voteBits.join(' · '),
+    checks,
+    failed,
+    passN,
+    knownN,
+    pred: { dir: predDir, label: predLabel, reason: predReason },
+    rebound: reboundLong,
+    dump: dumpShort,
+  };
 }
 
