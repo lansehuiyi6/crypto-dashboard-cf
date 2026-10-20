@@ -1546,7 +1546,7 @@ function macdBarsHtml(spark) {
 
 function volHtml(vol) {
   if (!vol || !vol.label) return '<span class="ema-muted">量 --</span>';
-  const cls = vol.kind === 'high' ? 'long' : vol.kind === 'low' ? 'short' : 'watch';
+  const cls = vol.barDir === 'up' ? 'long' : vol.barDir === 'down' ? 'short' : 'watch';
   const rx = Number.isFinite(vol.ratio) ? vol.ratio.toFixed(2) + 'x' : '--';
   return `<span class="strategy-tag ${cls}">${vol.label}</span><span class="ema-meta">${rx}</span>`;
 }
@@ -1590,7 +1590,7 @@ function macdKdjBgHtml(board, coin) {
   if (!d1) label1 = '1d 背景未就绪';
   else {
     const mk = d1.overbought ? '1d 超买' : d1.macdBull ? '1d 多头' : '1d 空头';
-    const env = d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线非多头环境';
+    const env = d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线空头环境';
     const stance = d1h && d1h.stanceLabel ? d1h.stanceLabel : '';
     const adx = d1h && d1h.adx ? `ADX${d1h.adx.adx.toFixed(0)}${d1h.adx.regimeLabel}` : '';
     const ema = d1h && d1h.emaTrendLabel ? d1h.emaTrendLabel : '';
@@ -1622,7 +1622,7 @@ function macdKdjBgHtml(board, coin) {
   const chips = [
     w1 ? `<span class="ema-chip ${htfChipClass(w1)}" title="1w 用上一根已收盘周K的 MACD(12,26,9) 柱：>0 偏多只开多，<0 偏空只开空">${labelW}${wBars}</span>` : '',
     `<span class="ema-chip ${htfChipClass(d1)}" title="1d 大背景：趋势还是震荡">${label1}</span>`,
-    `<span class="ema-chip ${htfChipClass(h4)}" title="4h 中期：强势/走弱/超跌">${label4}</span>`,
+    `<span class="ema-chip ${htfChipClass(h4)}" title="4h 中期：强势多/多头走弱/超跌偏空">${label4}</span>`,
   ].filter(Boolean).join('');
 
   return `<div class="ema-chip-row" aria-label="大周期背景">
@@ -1684,10 +1684,10 @@ function ema56PosHtml(row) {
   const above = row.price > row.ema56;
   const dist = distPctToEma56Safe(row.price, row.ema56);
   const cross = pulse.closeCross56 === 'up'
-    ? '收盘反穿↑'
+    ? '收盘向上反穿'
     : pulse.closeCross56 === 'down'
-      ? '收盘跌破↓'
-      : (above ? '站上' : '跌破');
+      ? '收盘向下跌破'
+      : (above ? '站上EMA56' : 'EMA56下方');
   const cls = pulse.closeCross56 === 'up' || (above && !pulse.closeCross56) ? 'long' : 'short';
   return `<span class="strategy-tag ${cls}">${cross}</span><span class="ema-meta">距EMA56 ${fmtDistPct(dist)}</span>`;
 }

@@ -452,7 +452,7 @@ export function annotateMacdKdjContext(mk, htf4h, htf1d) {
       action = 'counter';
       actionLabel = '逆势试多';
       bias = 'against';
-      reason = '本周期入场边沿，但 4h MACD 非多头，降权/轻仓';
+      reason = '本周期入场边沿，但 4h MACD 偏空，降权/轻仓';
     } else {
       action = 'entry';
       actionLabel = '入场边沿';
@@ -478,7 +478,7 @@ export function annotateMacdKdjContext(mk, htf4h, htf1d) {
     } else if (htfBear) {
       actionLabel = '多头动能区·逆势';
       bias = 'against';
-      reason = '本周期仍在 MACD 多头区，但 4h 非多头，留意离场';
+      reason = '本周期仍在 MACD 多头区，但 4h 偏空，留意离场';
     } else {
       actionLabel = '多头动能区';
     }
@@ -487,7 +487,7 @@ export function annotateMacdKdjContext(mk, htf4h, htf1d) {
   const bg4Label = !h4 ? '4h--' : htfOb ? '4h超买' : htfBull ? '4h多头' : '4h空头';
   const bg1Label = !d1 ? '1d--' : dOb ? '1d超买' : dBull ? '1d多头' : '1d空头';
   const envNote = d1
-    ? (dOb && dBull ? '日线多头但KDJ超买' : dBull ? '日线多头环境' : '日线非多头环境')
+    ? (dOb && dBull ? '日线多头但KDJ超买' : dBull ? '日线多头环境' : '日线空头环境')
     : '日线背景未就绪';
 
   return {
@@ -1134,14 +1134,14 @@ export function evaluateBollinger(klines, coin = '', opts = {}) {
   } else {
     hint = '观察开口方向';
   }
-  if (flip === 'up') hint = 'K线从下沿走到上沿，短线反弹特征。' + hint;
-  else if (flip === 'down') hint = 'K线从上沿打到下沿，短线回落特征。' + hint;
+  if (flip === 'up') hint = 'K线从下沿走到上沿，短线反弹多。' + hint;
+  else if (flip === 'down') hint = 'K线从上沿打到下沿，短线回落空。' + hint;
   if (expandEnd) hint = '阔口结束。' + hint;
   else if (squeezeEnd) hint = '收口结束、开始开口。' + hint;
 
   let pathLabel = '';
-  if (flip === 'up') pathLabel = '一侧到另一侧↑';
-  else if (flip === 'down') pathLabel = '一侧到另一侧↓';
+  if (flip === 'up') pathLabel = '下沿走到上沿↑';
+  else if (flip === 'down') pathLabel = '上沿走到下沿↓';
   else if (expandEnd) pathLabel = '阔口结束';
   else if (squeezeEnd) pathLabel = '收口结束·开口';
 
@@ -1266,7 +1266,7 @@ export function evaluateBollMidStrategy(klines, coin = '', opts = {}) {
   const longNow = longFlags[i];
   const shortNow = shortFlags[i];
   let setup = 'watch';
-  let setupLabel = '中轴观望';
+  let setupLabel = above ? '中轴观望·做多未齐' : '中轴观望·做空未齐';
   if (longNow) { setup = 'long'; setupLabel = '中轴做多'; }
   else if (shortNow) { setup = 'short'; setupLabel = '中轴做空'; }
 
@@ -1937,18 +1937,18 @@ function htfMidState(ema, bb, distPct) {
   }
   const z = bb && bb.zone;
   if (distPct >= 1.2 && (z === 'upper' || z === 'above' || (bb && bb.walkUpper)) && ema.trend === 'long') {
-    return { midKind: 'strong', midState: '强势' };
+    return { midKind: 'strong', midState: '强势多' };
   }
   if (distPct <= -1.2 && (z === 'lower' || z === 'below' || (bb && bb.walkLower))) {
-    return { midKind: 'oversold', midState: '超跌' };
+    return { midKind: 'oversold', midState: '超跌偏空' };
   }
   if (ema.trend === 'long' && (distPct < 0.35 || z === 'mid' || z === 'lowerMid' || z === 'lower')) {
-    return { midKind: 'weakening', midState: '走弱' };
+    return { midKind: 'weakening', midState: '多头走弱' };
   }
   if (ema.trend === 'short' && distPct < 0) {
-    return { midKind: 'weak', midState: '偏弱' };
+    return { midKind: 'weak', midState: '偏弱空' };
   }
-  if (ema.trend === 'long') return { midKind: 'firm', midState: '偏强' };
+  if (ema.trend === 'long') return { midKind: 'firm', midState: '偏强多' };
   if (ema.trend === 'short') return { midKind: 'soft', midState: '偏空' };
   return { midKind: 'neutral', midState: '中性' };
 }
@@ -1963,8 +1963,28 @@ function klineVol(row) {
   return { base: Number(row.v || row.volume), quote: Number(row.q || row.quoteVolume) };
 }
 
+function klineOC(row) {
+  if (!row) return null;
+  if (Array.isArray(row)) return { o: Number(row[1]), c: Number(row[4]) };
+  return { o: Number(row.o ?? row.open), c: Number(row.c ?? row.close) };
+}
+
+function barDirFromKline(row, prev) {
+  const cur = klineOC(row);
+  if (!cur || !Number.isFinite(cur.o) || !Number.isFinite(cur.c)) return 'flat';
+  if (cur.c > cur.o) return 'up';
+  if (cur.c < cur.o) return 'down';
+  const p = klineOC(prev);
+  if (p && Number.isFinite(p.c)) {
+    if (cur.c > p.c) return 'up';
+    if (cur.c < p.c) return 'down';
+  }
+  return 'flat';
+}
+
 /**
  * 成交量：上一根已收盘 vs 前 N 根均量。不另拉接口，用 K 线自带量。
+ * 标签带阳/阴方向：放量上涨、缩量下跌。
  */
 export function evaluateVolumePulse(klines, opts = {}) {
   const period = Math.max(intParam(opts.volMaLen, 20), 4);
@@ -1990,14 +2010,17 @@ export function evaluateVolumePulse(klines, opts = {}) {
   const volNow = nowV && Number.isFinite(nowV.base) ? nowV.base : null;
   const quoteClosed = closedV && Number.isFinite(closedV.quote) ? closedV.quote : null;
   const ratio = ma > 0 && volClosed != null ? volClosed / ma : null;
+  const barDir = barDirFromKline(klines[closed], klines[closed - 1]);
+  const dirWord = barDir === 'up' ? '上涨' : barDir === 'down' ? '下跌' : '';
   let kind = 'avg';
-  let label = '均量';
+  let baseLabel = '均量';
   if (ratio != null) {
-    if (ratio >= 1.4) { kind = 'high'; label = '放量'; }
-    else if (ratio >= 1.15) { kind = 'high'; label = '温和放量'; }
-    else if (ratio <= 0.6) { kind = 'low'; label = '缩量'; }
-    else if (ratio <= 0.85) { kind = 'low'; label = '略缩'; }
+    if (ratio >= 1.4) { kind = 'high'; baseLabel = '放量'; }
+    else if (ratio >= 1.15) { kind = 'high'; baseLabel = '温和放量'; }
+    else if (ratio <= 0.6) { kind = 'low'; baseLabel = '缩量'; }
+    else if (ratio <= 0.85) { kind = 'low'; baseLabel = '略缩'; }
   }
+  const label = dirWord ? `${baseLabel}${dirWord}` : baseLabel;
   return {
     interval,
     period,
@@ -2007,6 +2030,9 @@ export function evaluateVolumePulse(klines, opts = {}) {
     quoteClosed,
     ratio,
     kind,
+    barDir,
+    dirWord,
+    baseLabel,
     label,
   };
 }
@@ -2158,62 +2184,62 @@ function buildLtfPulse(interval, ema, bb, gold, closeCross56, distPct) {
   if (flipUp && goldUp) {
     dir = 'long';
     kind = 'rebound';
-    label = '反弹·金叉';
-    reasons.push(`金叉后 K 线从布林一侧走到另一侧，短线偏反弹（${gold.timeAgoText}）`);
+    label = '反弹多·金叉';
+    reasons.push(`金叉后 K 线从布林下沿走到上沿，短线反弹多（${gold.timeAgoText}）`);
   } else if (flipUp) {
     dir = 'long';
     kind = 'rebound';
-    label = '反弹·一侧到另一侧';
-    reasons.push('价格从布林下沿扫到上沿，短线反弹特征');
+    label = '反弹多·下沿走到上沿';
+    reasons.push('价格从布林下沿扫到上沿，短线反弹多');
   } else if (flipDn && goldDn) {
     dir = 'short';
     kind = 'dump';
-    label = '回落·死叉';
-    reasons.push(`死叉后 K 线从上沿打到下沿（${gold.timeAgoText}）`);
+    label = '回落空·死叉';
+    reasons.push(`死叉后 K 线从上沿打到下沿，短线回落空（${gold.timeAgoText}）`);
   } else if (flipDn) {
     dir = 'short';
     kind = 'dump';
-    label = '回落·一侧到另一侧';
-    reasons.push('价格从布林上沿扫到下沿');
+    label = '回落空·上沿走到下沿';
+    reasons.push('价格从布林上沿扫到下沿，短线回落空');
   } else if (closeCross56 === 'up') {
     dir = 'long';
     kind = 'trigger';
-    label = reclaim ? '触发·反穿并站回下轨' : '触发·收盘反穿EMA56';
-    reasons.push(reclaim ? '收盘反穿 EMA56，并站回布林下轨，可作开仓时点' : '收盘反穿 EMA56，短线触发');
+    label = reclaim ? '触发多·向上反穿并站回下轨' : '触发多·收盘向上反穿EMA56';
+    reasons.push(reclaim ? '收盘向上反穿 EMA56，并站回布林下轨，可作开多时点' : '收盘向上反穿 EMA56，短线触发多');
   } else if (closeCross56 === 'down') {
     dir = 'short';
     kind = 'trigger';
-    label = '触发·收盘跌破EMA56';
-    reasons.push('收盘跌破 EMA56，短线触发/止盈时点');
+    label = '触发空·收盘向下跌破EMA56';
+    reasons.push('收盘向下跌破 EMA56，短线触发空/多单止盈时点');
   } else if (reclaim && standAbove56) {
     dir = 'long';
     kind = 'trigger';
-    label = '触发·站回下轨';
-    reasons.push('站回布林下轨，短线可作开仓或止盈时点');
+    label = '触发多·站回下轨';
+    reasons.push('站回布林下轨，短线可作开多或空单止盈时点');
   } else if (rejectUp) {
     dir = 'short';
     kind = 'trigger';
-    label = '触发·上轨回落';
+    label = '触发空·上轨回落';
     reasons.push('从上轨回落，短线减多/看回中轨');
   } else if (standAbove56 && ema.trend === 'long') {
     dir = 'long';
     kind = 'bias';
-    label = '站上EMA56';
+    label = '站上EMA56·偏多';
     reasons.push('价格在 EMA56 上方，7/21 多头排列');
   } else if (!standAbove56 && ema && ema.trend === 'short') {
     dir = 'short';
     kind = 'bias';
-    label = 'EMA56下方';
+    label = 'EMA56下方·偏空';
     reasons.push('价格在 EMA56 下方，7/21 空头排列');
   } else if (goldUp) {
     dir = 'long';
     kind = 'bias';
-    label = '金叉后';
+    label = '金叉后·偏多';
     reasons.push(`7/21 金叉（${gold.timeAgoText}），等收盘站稳或布林确认`);
   } else if (goldDn) {
     dir = 'short';
     kind = 'bias';
-    label = '死叉后';
+    label = '死叉后·偏空';
     reasons.push(`7/21 死叉（${gold.timeAgoText}）`);
   }
 
@@ -2229,8 +2255,8 @@ function buildLtfPulse(interval, ema, bb, gold, closeCross56, distPct) {
     kind,
     label,
     baseLabel: label,
-    reason: reasons.join('。') || (is1m ? '等待收盘反穿 EMA56 或站回下轨' : '等待跟上 1m 方向'),
-    baseReason: reasons.join('。') || (is1m ? '等待收盘反穿 EMA56 或站回下轨' : '等待跟上 1m 方向'),
+    reason: reasons.join('。') || (is1m ? '等待收盘向上反穿 EMA56 或站回下轨' : '等待跟上 1m 方向'),
+    baseReason: reasons.join('。') || (is1m ? '等待收盘向上反穿 EMA56 或站回下轨' : '等待跟上 1m 方向'),
     goldUp,
     goldDn,
     flipUp,
@@ -2303,13 +2329,13 @@ export function annotateLtfPair(row1m, row5m) {
       confirmReason = `5m 方向与 1m ${word}一致，可作确认`;
     } else if (d5 === 'watch') {
       confirm = 'watch';
-      confirmLabel = '尚未跟上';
+      confirmLabel = `尚未跟上·等5m${word}`;
       confirmReason = `1m 已偏${word}，5m 还没跟上`;
       p1.awaitConfirm = true;
     } else {
       confirm = 'watch';
-      confirmLabel = '方向不一致';
-      confirmReason = `1m 偏${word}，5m 反向，降权`;
+      confirmLabel = `方向不一致·1m${word}/5m${d5 === 'long' ? '多' : '空'}`;
+      confirmReason = `1m 偏${word}，5m 反向偏${d5 === 'long' ? '多' : '空'}，降权`;
       p1.awaitConfirm = true;
     }
   }
@@ -2453,13 +2479,13 @@ export function evaluateTfForecast(input) {
     && (mid4 === 'strong' || mid4 === 'firm' || vD === 'long' || v4 === 'long');
 
   let side = 'watch';
-  let badge = '震荡';
+  let badge = '震荡观望';
   if (reboundLong) {
     side = 'long';
-    badge = '反弹';
+    badge = '反弹多';
   } else if (dumpShort) {
     side = 'short';
-    badge = '回落';
+    badge = '回落空';
   } else if (d1m !== 'watch' && (d5m === d1m || confirm5 === d1m) && (d1h === d1m || d15 === d1m || vD === d1m)) {
     side = d1m;
     badge = (vD === d1m && (mid4 === 'strong' || mid4 === 'firm' || mid4 === 'weak' || mid4 === 'soft'))
@@ -2476,7 +2502,7 @@ export function evaluateTfForecast(input) {
     badge = '偏空';
   } else {
     side = longVotes >= shortVotes ? 'long' : 'short';
-    badge = '震荡';
+    badge = side === 'long' ? '震荡偏多' : '震荡偏空';
   }
 
   const dirWord = side === 'long' ? '多' : '空';
@@ -2580,7 +2606,7 @@ export function evaluateTfForecast(input) {
       alignDetail = `顺势 ${d1m === 'long' ? '多' : '空'}`;
     } else if (reboundLong || dumpShort) {
       alignPass = true;
-      alignDetail = d1m === 'long' ? '1h空/1m多 · 逆势反弹' : '1h多/1m空 · 逆势回落';
+      alignDetail = d1m === 'long' ? '1h空/1m多 · 逆势反弹多' : '1h多/1m空 · 逆势回落空';
     } else {
       alignPass = false;
       alignDetail = `1h ${d1h === 'long' ? '多' : '空'} vs 1m ${d1m === 'long' ? '多' : '空'}`;
@@ -2607,24 +2633,26 @@ export function evaluateTfForecast(input) {
     predDir = side;
     predLabel = side === 'long' ? '试多' : '试空';
     predReason = `1m 触发且 5m 跟上，${dirWord}向结构同向。`;
-    if (badge === '反弹' || badge === '回落') {
+    if (badge === '反弹多' || badge === '回落空') {
       predLabel = side === 'long' ? '轻仓试多' : '轻仓试空';
-      predReason = badge === '反弹'
-        ? '大周期偏空/超跌，1m 反弹只作轻仓或空单止盈。'
-        : '大周期偏多，1m 回落只作轻仓或多单止盈。';
+      predReason = badge === '反弹多'
+        ? '大周期偏空/超跌，1m 反弹多只作轻仓或空单止盈。'
+        : '大周期偏多，1m 回落空只作轻仓或多单止盈。';
     }
   } else if (trigOk && confOk && (reboundLong || dumpShort)) {
     predDir = side;
     predLabel = side === 'long' ? '轻仓试多' : '轻仓试空';
     predReason = hardBlock
       ? `背景${aW.detail || aD.detail}，1m 形态只能轻仓。`
-      : (reboundLong ? '超跌/空头背景下的 1m 反弹。' : '强势/多头背景下的 1m 回落。');
+      : (reboundLong ? '超跌/空头背景下的 1m 反弹多。' : '强势/多头背景下的 1m 回落空。');
   } else if (trigOk && !confOk) {
     predLabel = '等5m确认';
     predReason = `1m 已偏${dirWord}，等 5m 跟上再动手。`;
   } else if (!trigOk && (h1Pass || m15Pass) && (aD.pass || aW.pass) && !hardBlock) {
     predLabel = '等1m触发';
-    predReason = `大周期允许做${dirWord}，等 1m 收盘反穿 EMA56 或站回布林。`;
+    predReason = side === 'long'
+      ? '大周期允许做多，等 1m 收盘向上反穿 EMA56 或站回布林。'
+      : '大周期允许做空，等 1m 收盘向下跌破 EMA56 或从上轨回落。';
   } else if (bbPass === false) {
     predLabel = '闭口观望';
     predReason = '布林收口，即使方向对也不追。';
@@ -2652,10 +2680,10 @@ export function evaluateTfForecast(input) {
   ].filter(Boolean);
 
   const mark = (d, stance) => {
-    if (stance === 'both') return '双';
+    if (stance === 'both') return '两边';
     if (d === 'long') return '多';
     if (d === 'short') return '空';
-    return '平';
+    return '观望';
   };
   const voteBits = [
     w1 ? `1w${mark(vW, stW)}` : null,

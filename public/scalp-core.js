@@ -188,9 +188,9 @@ export function classifyQuadrant({ pricePct, oiPct, fundingAnn }) {
   if (priceUp && oiUp && fundMild) {
     return {
       id: 'healthy_long',
-      tag: '趋势健康',
+      tag: '多头趋势健康',
       cls: 'long',
-      hint: '价涨 + OI 升 + 资金费温和：趋势健康，顺势、杠杆低。',
+      hint: '价涨 + OI 升 + 资金费温和：多头趋势健康，顺势做多、杠杆低。',
     };
   }
   if (priceDn && oiDn) {
@@ -204,7 +204,7 @@ export function classifyQuadrant({ pricePct, oiPct, fundingAnn }) {
   if (priceFlat && fundHighPos) {
     return {
       id: 'air_long',
-      tag: '猎杀风险',
+      tag: '多头猎杀风险',
       cls: 'short',
       hint: '价滞 + 高正费率：多头在给空气付费，下方若有清算堆更容易被猎杀。',
     };
@@ -220,9 +220,9 @@ export function classifyQuadrant({ pricePct, oiPct, fundingAnn }) {
   if (priceDn && oiUp && fundMild) {
     return {
       id: 'healthy_short',
-      tag: '空头趋势',
+      tag: '空头趋势健康',
       cls: 'short',
-      hint: '价跌 + OI 升 + 费率温和：空头在加仓，顺势做空比抄底更合适。',
+      hint: '价跌 + OI 升 + 费率温和：空头趋势健康，顺势做空比抄底更合适。',
     };
   }
   if (priceUp && oiDn) {
@@ -430,7 +430,8 @@ function pickPlay(quad, sweep, pull, depth) {
     };
   }
   if (sweep.kind === 'cascade') {
-    return { id: 'skip_cascade', label: '级联勿抄', cls: 'watch', hint: sweep.reason, play: sweep };
+    const lab = sweep.dir === 'long' ? '级联下跌勿抄底' : '级联上涨勿摸头';
+    return { id: 'skip_cascade', label: lab, cls: 'watch', hint: sweep.reason, play: sweep };
   }
   if (quad.id === 'crowded_long' || quad.id === 'air_long') {
     if (sweep.kind === 'entry' && sweep.dir === 'short') {
@@ -452,13 +453,22 @@ function pickPlay(quad, sweep, pull, depth) {
     return { id: 'B_' + pull.dir, label: lab, cls: pull.dir, hint: pull.reason, play: pull };
   }
   if (sweep.kind === 'wait' || sweep.kind === 'watch') {
-    return { id: 'A_wait', label: '扫簇观察', cls: 'watch', hint: sweep.reason, play: sweep };
+    const lab = sweep.dir === 'long' ? '扫簇观察·等多' : sweep.dir === 'short' ? '扫簇观察·等空' : '扫簇观察';
+    return { id: 'A_wait', label: lab, cls: 'watch', hint: sweep.reason, play: sweep };
   }
   if (pull.kind === 'watch') {
-    return { id: 'B_wait', label: '回踩观察', cls: 'watch', hint: pull.reason, play: pull };
+    const lab = pull.dir === 'long' ? '回踩观察·等多' : '反抽观察·等空';
+    return { id: 'B_wait', label: lab, cls: 'watch', hint: pull.reason, play: pull };
   }
   if (quad.id === 'healthy_long' || quad.id === 'healthy_short') {
-    return { id: 'bias_only', label: '结构健康·等进场', cls: quad.cls, hint: '价/OI 结构健康，但 1m 没有扫簇确认或回踩，先等。' };
+    const lab = quad.id === 'healthy_short' ? '空头趋势健康·等进场' : '多头趋势健康·等进场';
+    const dirWord = quad.id === 'healthy_short' ? '空' : '多';
+    return {
+      id: 'bias_only',
+      label: lab,
+      cls: quad.cls,
+      hint: `价/OI 是${dirWord}头趋势健康，但 1m 没有扫簇确认或回踩，先等，不要追。`,
+    };
   }
   return { id: 'flat', label: '观望', cls: 'watch', hint: '没有可重复的 A/B 结构。每次只做一种，不追突破兼抄反转。' };
 }
@@ -558,7 +568,8 @@ export function buildAdvice(view = {}) {
     return wait('不开：盘口偏薄', action.hint || '滑点会把超短线优势吃掉。');
   }
   if (action.id === 'skip_cascade') {
-    return wait('不开：级联勿抄', action.hint || play.reason || '');
+    const title = play.dir === 'long' ? '不开：级联下跌勿抄底' : play.dir === 'short' ? '不开：级联上涨勿摸头' : '不开：级联勿抄';
+    return wait(title, action.hint || play.reason || '');
   }
   if (action.id === 'reduce_long') {
     return {
