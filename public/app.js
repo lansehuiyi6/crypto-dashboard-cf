@@ -19,6 +19,7 @@ import {
   BOARD_INTERVALS,
 } from './ema-core.js';
 import { SCALP_SYMBOLS, evaluateScalp } from './scalp-core.js';
+import { loadPb80, pb80StripHtml, setPb80Repaint } from './pb80-live.js';
 
 const KLINE_LIMIT = 160;
 
@@ -418,6 +419,7 @@ async function addTempPairFromUi() {
     await fetchSymbolIntoBoard(board, parsed.coin, parsed.symbol, true);
     paintEmaBoard(board, { immediate: true, notify: true });
     setEmaNote(board);
+    loadPb80({ force: false, symbols: Object.values(getStrategySymbolMap()) }).catch(() => {});
   } catch (e) {
     setTempPairMsg(e.message || '添加失败', 'err');
   } finally {
@@ -1850,6 +1852,7 @@ function renderOneEmaCard(data, coin, kind = 'fixed', meta = null) {
     </div>
     ${macdKdjBgHtml(data, coin)}
     ${renderQualPanel(data, coin)}
+    ${pb80StripHtml(getStrategySymbolMap()[coin])}
     <div class="ema-tf-stack">
       <div class="ema-tf-cols ema-ltf-cols">
         ${renderLtfCol('1m', r1m)}
@@ -3694,6 +3697,7 @@ function refreshAll(force = false) {
   loadReversalSignals();
   loadBottomReversalSignals();
   if (typeof window.loadCreatorStudy === 'function') window.loadCreatorStudy();
+  loadPb80({ force, symbols: Object.values(getStrategySymbolMap()) }).catch(() => {});
 }
 
 document.getElementById('refreshBtn').addEventListener('click', () => {
@@ -3703,7 +3707,13 @@ document.getElementById('refreshBtn').addEventListener('click', () => {
 
 initEmaNotifyUi();
 initTempPairUi();
+setPb80Repaint(() => {
+  if (lastEmaBoard) renderEmaCards(lastEmaBoard);
+});
 refreshAll();
+setInterval(() => {
+  loadPb80({ force: false, symbols: Object.values(getStrategySymbolMap()) }).catch(() => {});
+}, 180000);
 setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
 setInterval(fetchOverview, 60000);

@@ -1,7 +1,32 @@
 /**
- * 博主读盘模拟。规则来自两位频道标题，数字每次用币安日 K 重算。
+ * 博主读盘模拟。规则来自两位频道标题。
+ * 日线定结构，4 小时定反应；两层不一致就从试多/试空退回等收盘。
  * 试多 / 试空才是开单；等收盘是条件没齐；不开就是今天没有单。
+ *
+ * 学习水位按视频 id，不按会随新片前移的播放列表序号。
+ * 上次：zxhy 9月30日 Hy1tvue1g8Y，Ronnie 10月1日 fPvJBFrXBZk（目录停在 2026-10-01 的 300 期）。
+ * 这次补到：zxhy 10月23日 _04sPZaxZ2o，Ronnie 10月22日 FVBYGJeNM2U。
+ * 明细在 data/creator-study/studied.json。
  */
+
+export const STUDY = {
+  zxhy: {
+    throughId: '_04sPZaxZ2o',
+    throughDate: '10月23日',
+    previousId: 'Hy1tvue1g8Y',
+    previousDate: '9月30日',
+    gap: 12,
+  },
+  ronnie: {
+    throughId: 'FVBYGJeNM2U',
+    throughDate: '10月22日',
+    previousId: 'fPvJBFrXBZk',
+    previousDate: '10月1日',
+    gap: 14,
+  },
+};
+
+const BAR_MS = { '1d': 86400000, '4h': 4 * 60 * 60 * 1000 };
 
 const COINS = [
   { sym: 'BTC', pair: 'BTCUSDT', futures: false },
@@ -39,8 +64,8 @@ function bandWidth(closes, end) {
   return { mid, upper: mid + 2 * sd, lower: mid - 2 * sd, bw: mid ? (4 * sd) / mid * 100 : 0 };
 }
 
-/** 把币安 K 线收成读盘用的结构。最后一根是未收盘日 K 时 candleOpen 为 true。 */
-export function structureFromKlines(sym, rows, now = Date.now()) {
+/** 把币安 K 线收成读盘用的结构。interval 为 1d 或 4h，最后一根未收完时 candleOpen 为 true。 */
+export function structureFromKlines(sym, rows, now = Date.now(), interval = '1d') {
   const opens = rows.map((r) => +r[1]);
   const highs = rows.map((r) => +r[2]);
   const lows = rows.map((r) => +r[3]);
@@ -78,6 +103,15 @@ export function structureFromKlines(sym, rows, now = Date.now()) {
   const openMs = +rows[n - 1][0];
   const weekSpan = Math.max(...highs.slice(-7)) - Math.min(...lows.slice(-7)) || last * 0.01;
   const weekClosePos = (last - Math.min(...lows.slice(-7))) / weekSpan;
+  const sum = (arr) => arr.reduce((a, b) => a + b, 0);
+  const recentW = sum(vols.slice(-7));
+  const priorW = sum(vols.slice(-14, -7));
+  let flips = 0;
+  for (let i = Math.max(2, n - 6); i < n; i++) {
+    const a = closes[i] - closes[i - 1];
+    const b = closes[i - 1] - closes[i - 2];
+    if (a * b < 0 && Math.abs(a) > last * 0.0015) flips += 1;
+  }
   return {
     sym,
     last,
@@ -88,6 +122,7 @@ export function structureFromKlines(sym, rows, now = Date.now()) {
     hi20,
     lo20,
     pos20: (last - lo20) / span,
+    ema7: ema(closes, 7),
     ema21: ema(closes, 21),
     ema56: ema(closes, 56),
     bw: bb.bw,
@@ -109,18 +144,23 @@ export function structureFromKlines(sym, rows, now = Date.now()) {
     priorHi,
     brokeDown: last < priorLo && closePos <= 0.35,
     brokeUp: last > priorHi && closePos >= 0.65,
-    engulfBull: last >= opens[n - 1]
-      && opens[n - 1] <= Math.min(prevOpen, prev)
-      && last >= Math.max(prevOpen, prev),
-    engulfBear: last < opens[n - 1]
-      && opens[n - 1] >= Math.max(prevOpen, prev)
-      && last <= Math.min(prevOpen, prev),
+    engulfBull: prev < prevOpen
+      && last > opens[n - 1]
+      && opens[n - 1] <= prev
+      && last >= prevOpen,
+    engulfBear: prev > prevOpen
+      && last < opens[n - 1]
+      && opens[n - 1] >= prev
+      && last <= prevOpen,
     inside: highs[n - 1] < prevHigh && lows[n - 1] > prevLow,
     hammer: lowerWick > Math.max(body, last * 0.001) * 2 && upperWick <= body && closePos >= 0.6,
     star: upperWick > Math.max(body, last * 0.001) * 2 && lowerWick <= body && closePos <= 0.4,
     weekHeld: weekClosePos >= 0.62,
+    weekVolRatio: priorW ? recentW / priorW : 1,
+    flips,
+    interval,
     ext21: 0,
-    candleOpen: now < openMs + 86400000,
+    candleOpen: now < openMs + (BAR_MS[interval] || BAR_MS['1d']),
   };
 }
 
@@ -137,6 +177,75 @@ function tightBox(m) {
 function withExt(m) {
   m.ext21 = m.ema21 ? (m.last - m.ema21) / m.ema21 : 0;
   return m;
+}
+
+function dailyFactorLine(m, who) {
+  const bits = [];
+  if (m.engulfBear) bits.push('看跌吞没');
+  if (m.engulfBull) bits.push('看涨吞没');
+  if (who === 'zxhy' && m.inside && m.pos20 > 0.28 && m.pos20 < 0.78) bits.push('母子抱');
+  const mid = (m.hi20 + m.lo20) / 2;
+  if (m.pos20 >= 0.38 && m.pos20 <= 0.68) bits.push(`半分 ${fmtPx(mid)}`);
+  else if (m.pos20 <= 0.35) bits.push('下沿');
+  else if (m.pos20 >= 0.82) bits.push('前高压力');
+  if (m.last >= m.ema21) bits.push(`21线上 ${fmtPx(m.ema21)}`);
+  else bits.push(`21线下 ${fmtPx(m.ema21)}`);
+  if (Number.isFinite(m.ema7) && Math.abs(m.ema7 - m.ema21) / m.last < 0.01) bits.push('7线21线粘住');
+  if (Number.isFinite(m.ema56) && Math.abs(m.ema21 - m.ema56) / m.last < 0.012) bits.push('均线收拢');
+  if (Number.isFinite(m.weekVolRatio) && m.weekVolRatio < 0.8) bits.push(`近一周量 ${m.weekVolRatio.toFixed(2)} 倍`);
+  bits.push(`量能 ${Number(m.volRatio).toFixed(2)} 倍`);
+  bits.push(m.bullish ? '阳线' : '阴线');
+  return bits.join(' · ');
+}
+
+function h4FactorLine(h4) {
+  if (!h4 || !Number.isFinite(h4.last) || !Number.isFinite(h4.ema21)) return '这轮没有4小时K线';
+  const bits = [];
+  if (h4.engulfBear) bits.push('看跌吞没');
+  else if (h4.engulfBull) bits.push('看涨吞没');
+  if (h4.low < h4.ema21 && h4.last >= h4.ema21) bits.push('回踩后站回均线');
+  else if (h4.last >= h4.ema21) bits.push(`站在均线 ${fmtPx(h4.ema21)} 上`);
+  else bits.push(`在均线 ${fmtPx(h4.ema21)} 下`);
+  if (Number.isFinite(h4.highTests) && h4.highTests >= 2 && !h4.bullish && h4.closePos <= 0.45) bits.push('冲高回落');
+  if (Number.isFinite(h4.priorLo) && h4.low < h4.priorLo && h4.last >= h4.priorLo) bits.push('扫低收回');
+  if (Number.isFinite(h4.ema56) && Math.abs(h4.ema21 - h4.ema56) / h4.last < 0.01) bits.push('均线收拢');
+  if (Number.isFinite(h4.pos20)) bits.push(`位置 ${h4.pos20.toFixed(2)}`);
+  bits.push(h4.bullish ? '阳线' : '阴线');
+  if (h4.candleOpen) bits.push('未收盘');
+  return bits.join(' · ');
+}
+
+function h4Holding(h4) {
+  if (!h4 || !Number.isFinite(h4.ema21) || !Number.isFinite(h4.last)) return false;
+  return h4.last > h4.ema21 * 1.002 && h4.bullish && h4.closePos >= 0.58 && !h4.engulfBear;
+}
+
+function h4Lost(h4) {
+  if (!h4 || !Number.isFinite(h4.ema21) || !Number.isFinite(h4.last)) return false;
+  return h4.last < h4.ema21 * 0.995 && !h4.bullish && h4.closePos <= 0.4 && !h4.engulfBull;
+}
+
+/** 日线结论先算完。4小时还撑着就先不空，4小时还在均线下就先不多。 */
+function applyFrames(read, m, h4, who) {
+  let next = read;
+  if (read.signal === 'short' && h4Holding(h4)) {
+    next = order(
+      'wait',
+      '等收盘',
+      `${read.why} 4小时仍站在均线 ${fmtPx(h4.ema21)} 上并收住。日线只给定位置，4小时没收出空的反应，这单先等。`,
+      `4小时收盘落到 ${fmtPx(h4.ema21)} 下方`,
+      read.invalid,
+    );
+  } else if (read.signal === 'long' && h4Lost(h4)) {
+    next = order(
+      'wait',
+      '等收盘',
+      `${read.why} 4小时还在均线 ${fmtPx(h4.ema21)} 下方。他要看到4小时站上，才把日线的多做出去，这单先等。`,
+      `4小时收盘站上 ${fmtPx(h4.ema21)}`,
+      read.invalid,
+    );
+  }
+  return { ...next, daily: dailyFactorLine(m, who), h4: h4FactorLine(h4) };
 }
 
 function order(signal, label, why, trigger, invalid) {
@@ -156,8 +265,7 @@ function weakerThanBtc(m, ctx) {
 }
 
 /** zxhy：低位急杀或半分位守住才接，前高收弱才空，缩量上涨和破位不接。 */
-export function zxhyRead(raw, ctx = {}) {
-  const m = withExt({ ...raw });
+function zxhyDaily(m, ctx = {}) {
   const lowZone = m.pos20 <= 0.35;
   const highZone = m.pos20 >= 0.82;
   const held = m.bullish && m.closePos >= 0.62 && m.last > m.lo20;
@@ -176,14 +284,25 @@ export function zxhyRead(raw, ctx = {}) {
     && m.pos20 >= 0.35 && m.pos20 <= 0.72 && m.volRatio >= 0.6 && !m.inside;
 
   const altLong = (ord) => {
-    if (!weakerThanBtc(m, ctx)) return ord;
-    return order(
-      'skip',
-      '不开',
-      `${px} 今天比 BTC 弱。他让山寨跟着饼走，弱的不单开。`,
-      '等它重新强过 BTC 当日',
-      '继续明显弱于 BTC',
-    );
+    if (weakerThanBtc(m, ctx)) {
+      return order(
+        'skip',
+        '不开',
+        `${px} 今天比 BTC 弱。他让山寨跟着饼走，弱的不单开。`,
+        '等它重新强过 BTC 当日',
+        '继续明显弱于 BTC',
+      );
+    }
+    if (m.sym === 'XAU' && ord.signal === 'long' && m.pos20 <= 0.4 && !(m.engulfBull && m.volRatio >= 1)) {
+      return order(
+        'wait',
+        '等收盘',
+        `${ord.why} 黄金低位他要再看几天，第一根止跌不当多。`,
+        `再守住 ${lo}，或出现放量看涨吞没`,
+        ord.invalid,
+      );
+    }
+    return ord;
   };
 
   if (m.brokeDown && !m.hammer) {
@@ -199,7 +318,7 @@ export function zxhyRead(raw, ctx = {}) {
     return order(
       'skip',
       '不开',
-      `${px} 刚收到前高 ${fmtPx(m.priorHi)} 外面。他问过周线吞没能不能直接追，答案是等杯柄、等回踩，不追这根。`,
+      `${px} 刚收到前高 ${fmtPx(m.priorHi)} 外面。洗盘结束去挑战前高，他也不追这根，等杯柄、等回踩。`,
       `回踩 ${fmtPx(m.priorHi)} 守住再看`,
       `收回 ${fmtPx(m.priorHi)} 下方，假突破`,
     );
@@ -220,6 +339,80 @@ export function zxhyRead(raw, ctx = {}) {
       `${px} 包在前一根里面，是他讲的母子抱。方向没选出来，里面不开。`,
       `收盘站上 ${fmtPx(m.prevHigh)} 或跌破 ${fmtPx(m.prevLow)}`,
       '还包在母线里',
+    );
+  }
+
+  const half = m.pos20 >= 0.38 && m.pos20 <= 0.68;
+  const engulfNeck = fmtPx(Math.max(m.open, m.prev));
+  const bullTrap = m.high > m.priorHi && m.last < m.priorHi && !m.bullish && m.pos20 >= 0.45;
+  if (bullTrap && m.volRatio >= 0.75) {
+    return order(
+      'short',
+      '试空',
+      `${px} 冲过前高 ${fmtPx(m.priorHi)} 又收回来。他最近把这种走法叫诱多陷阱，不追多，收不回去就空。`,
+      `收盘留在 ${fmtPx(m.priorHi)} 下方`,
+      `收盘重新站上 ${fmtPx(m.priorHi)}`,
+    );
+  }
+  if (m.engulfBear && !lowZone) {
+    const thin = m.volRatio < 0.85;
+    const upper = m.pos20 > 0.68;
+    if (thin && !upper) {
+      return order(
+        'wait',
+        '等收盘',
+        `${px} 是看跌吞没，量能只有 ${m.volRatio.toFixed(2)} 倍。他写过空方缩量、不反弹不空，这根不追。`,
+        `反抽靠近 ${engulfNeck} 再空`,
+        `收盘站回 ${engulfNeck} 上方，吞没失效`,
+      );
+    }
+    if (half || upper) {
+      const where = half
+        ? `收在 20 日半分 ${fmtPx(midPx)} 附近。他 10 月 23 日的题目就是看跌吞没、半分位空，不把这根当洗盘去接`
+        : `在 20 日上半区（位置 ${m.pos20.toFixed(2)}）。高位看跌吞没他空这根，不追已经跌远的延伸段`;
+      return order(
+        'short',
+        '试空',
+        `${px} 看跌吞没，量能 ${m.volRatio.toFixed(2)} 倍，${where}。`,
+        `收盘留在 ${fmtPx(m.open)} 下方`,
+        `收盘站回 ${engulfNeck} 上方`,
+      );
+    }
+  }
+  if (m.engulfBull && ((m.ext21 > 0.02 && m.pos20 > 0.62) || (m.volRatio < 0.85 && m.pos20 >= 0.55))) {
+    return order(
+      'skip',
+      '不开',
+      `${px} 是看涨吞没，位置 ${m.pos20.toFixed(2)}，量能 ${m.volRatio.toFixed(2)} 倍。他问过能不能直接追，供给区量能跟不上就是诱多，等杯柄、等回踩。`,
+      `回踩 ${fmtPx(m.ema21)} 守住再看`,
+      `收回 ${fmtPx(m.ema56)} 下方`,
+    );
+  }
+  if (m.engulfBull && m.pos20 <= 0.38 && m.last >= m.priorLo && m.volRatio >= 0.75) {
+    if (m.sym === 'XAU') {
+      return order(
+        'wait',
+        '等收盘',
+        `${px} 低位看涨吞没，量能 ${m.volRatio.toFixed(2)} 倍。黄金他要再观察几天，第一根止跌不当多，也要防破前低。`,
+        `再收一根守住 ${lo}，或第二次测试仍收回`,
+        `收盘跌破 ${fmtPx(m.priorLo)}`,
+      );
+    }
+    return altLong(order(
+      'long',
+      '试多',
+      `${px} 低位看涨吞没，量能 ${m.volRatio.toFixed(2)} 倍，还在前低 ${fmtPx(m.priorLo)} 上方。这是他的承接，不是去追已经涨远的阳线。`,
+      `收盘守在 ${lo} 上方`,
+      `收盘跌破 ${lo}`,
+    ));
+  }
+  if (m.engulfBull && m.pos20 > 0.38) {
+    return order(
+      'wait',
+      '等收盘',
+      `${px} 看涨吞没已经离开低位（位置 ${m.pos20.toFixed(2)}）。他要的是回踩半分止跌，不是追这根阳线。`,
+      `回踩半分 ${fmtPx(midPx)} 并守住再看`,
+      `收回 ${fmtPx(m.ema56)} 下方`,
     );
   }
 
@@ -249,6 +442,42 @@ export function zxhyRead(raw, ctx = {}) {
       `收盘仍守 ${lo}`,
       `放量跌破 ${lo}`,
     ));
+  }
+  if (m.volRatio >= 1.4 && m.closePos > 0.38 && m.closePos < 0.62 && m.pos20 > 0.32 && m.pos20 < 0.78) {
+    return order(
+      'wait',
+      '等收盘',
+      `${px} 关键位置量能 ${m.volRatio.toFixed(2)} 倍，收盘还在今日中间。他问这是不是带量 PB、会不会反转，收盘没选出方向之前不当已经反转。`,
+      '收盘走到今日上半部或下半部',
+      '还收在今日中间',
+    );
+  }
+  if ((m.flips || 0) >= 4 && m.hi7 && (m.hi7 - m.lo7) / m.last < 0.07 && m.pos20 > 0.3 && m.pos20 < 0.75) {
+    return order(
+      'skip',
+      '不开',
+      `${px} 近几根来回翻了 ${m.flips} 次，7 日还挤在 ${fmtPx(m.lo7)}–${fmtPx(m.hi7)}。他把这种叫锯齿洗盘，用震荡策略，不开趋势单。`,
+      `收盘走出 ${fmtPx(m.lo7)}–${fmtPx(m.hi7)}`,
+      '还在这段来回里',
+    );
+  }
+  if (Number.isFinite(m.ema7) && Math.abs(m.ema7 - m.ema21) / m.last < 0.01 && Math.abs(m.last - m.ema21) / m.last < 0.012 && m.pos20 > 0.35 && m.pos20 < 0.78) {
+    return order(
+      'wait',
+      '等收盘',
+      `${px} 贴着 7 线 ${fmtPx(m.ema7)} 和 21 线 ${fmtPx(m.ema21)}，两线还粘在一起。他 10 月 13 日的题目是该死不死、等东风，没收出站上或跌破之前不定先上还是先下。`,
+      `收盘离开 ${fmtPx(m.ema21)} 一侧`,
+      '还粘着这两根线',
+    );
+  }
+  if (Number.isFinite(m.ema56) && Math.abs(m.ema21 - m.ema56) / m.last < 0.012 && m.pos20 > 0.3 && m.pos20 < 0.72 && m.hi7 && (m.hi7 - m.lo7) / m.last < 0.08 && m.last <= Math.max(m.ema21, m.ema56) * 1.01 && m.last >= Math.min(m.ema21, m.ema56) * 0.99) {
+    return order(
+      'skip',
+      '不开',
+      `${px} 夹在 21 线 ${fmtPx(m.ema21)} 和 56 线 ${fmtPx(m.ema56)} 中间，两线已经收拢。他 10 月 20 日写积累订单、不断揉搓，剧本没走出来就不开。`,
+      `收盘离开 ${fmtPx(Math.max(m.ema21, m.ema56))}`,
+      `还夹在 ${fmtPx(m.ema21)} 和 ${fmtPx(m.ema56)} 中间`,
+    );
   }
   if (halfHold) {
     return altLong(order(
@@ -286,6 +515,18 @@ export function zxhyRead(raw, ctx = {}) {
       `收盘站上 ${fmtPx(m.ema21)}`,
     );
   }
+  const prevBody = m.prev ? Math.abs(m.prev - m.prevOpen) / m.prev : 0;
+  const tower = m.pos20 >= 0.6 && m.pos20 < 0.9 && !m.bullish && m.closePos <= 0.4
+    && prevBody >= 0.02 && m.prev > m.prevOpen && m.last < m.prevOpen;
+  if (tower) {
+    return order(
+      m.volRatio >= 0.9 ? 'short' : 'skip',
+      m.volRatio >= 0.9 ? '试空' : '不开',
+      `${px} 前一根大阳之后收回去了，还在上半区（位置 ${m.pos20.toFixed(2)}）。他 10 月 7 日把这种叫塔型顶、会画门，趋势走完先不抄底。`,
+      m.volRatio >= 0.9 ? `收盘留在 ${fmtPx(m.prevOpen)} 下方` : '等反抽失败再谈空，现在不抄',
+      `收盘重新站上 ${fmtPx(m.prevOpen)}`,
+    );
+  }
   if (highZone && (rejected || m.engulfBear || m.star)) {
     return order(
       'short',
@@ -293,6 +534,15 @@ export function zxhyRead(raw, ctx = {}) {
       `${px} 贴着 20 日高点 ${hi}（位置 ${m.pos20.toFixed(2)}），${m.engulfBear ? '看跌吞没' : m.star ? '上针' : '收在今日下半部'}。高位他不多，收弱才空，不提前摸。`,
       `收盘站不回 ${hi}`,
       `收盘突破 ${hi}`,
+    );
+  }
+  if (Number.isFinite(m.weekVolRatio) && m.weekVolRatio < 0.8 && m.pos20 >= 0.72 && !rejected) {
+    return order(
+      'skip',
+      '不开',
+      `${px} 贴着前高，近一周量能只有前一周的 ${m.weekVolRatio.toFixed(2)} 倍。他 10 月 5 日写关键位置加上月周缩量，小心回调，要看前高压力和收盘价，不追。`,
+      `放量收盘站上 ${hi} 再看`,
+      `缩量跌回 ${fmtPx(m.ema21)}`,
     );
   }
   if (m.ext21 >= 0.04 || (highZone && !rejected)) {
@@ -322,6 +572,15 @@ export function zxhyRead(raw, ctx = {}) {
       `收盘跌破 ${lo}`,
     );
   }
+  if (m.bullish && m.dayChg > 0.004 && m.last < m.ema21 * 0.995 && m.pos20 < 0.6) {
+    return order(
+      'skip',
+      '不开',
+      `${px} 在反弹，还没收回 21 日均线 ${fmtPx(m.ema21)}。他 10 月 12 日问会不会是 ABC 调整，这种反弹不接。`,
+      `收盘站上 ${fmtPx(m.ema21)} 再看`,
+      `反弹失败跌破 ${lo}`,
+    );
+  }
   const place = m.pos20 >= 0.65 ? '偏上' : '中部';
   const box = tightBox(m);
   return order(
@@ -333,9 +592,14 @@ export function zxhyRead(raw, ctx = {}) {
   );
 }
 
-/** Ronnie：第二脚确认才做，第一次碰不当单，跌破后的延伸段不追。 */
-export function ronnieRead(raw) {
+export function zxhyRead(raw, ctx = {}) {
   const m = withExt({ ...raw });
+  const h4 = ctx.h4 ? withExt({ ...ctx.h4 }) : null;
+  return applyFrames(zxhyDaily(m, ctx), m, h4, 'zxhy');
+}
+
+/** Ronnie：第二脚确认才做，第一次碰不当单，跌破后的延伸段不追。日线没完成，4小时的上行不升成日线单。 */
+function ronnieDaily(m, ctx = {}) {
   const nearLow = m.pos20 <= 0.25 && m.low <= m.lo20 * 1.012;
   const nearHigh = m.pos20 >= 0.82;
   const held = m.closePos >= 0.55 && m.last > m.lo20 && m.bullish;
@@ -350,12 +614,23 @@ export function ronnieRead(raw) {
   const halfHold = taggedMid && m.pos20 >= 0.4 && m.pos20 <= 0.62
     && held && speedOk && m.last > m.ema56 && m.ext21 < 0.03 && !m.inside;
   const highFail = nearHigh && ((m.closePos <= 0.45 && !m.bullish) || m.engulfBear || m.star);
+  const sweptLow = m.low < m.priorLo && m.last >= m.priorLo;
+  const altLong = (ord) => {
+    if (!weakerThanBtc(m, ctx) || ord.signal !== 'long') return ord;
+    return order(
+      'skip',
+      '不开',
+      `${px} 支撑在 BTC 上，这根山寨更弱。他写过支撑有效不等于山寨安全，弱的不单开。`,
+      '等它重新强过 BTC 当日',
+      '继续明显弱于 BTC',
+    );
+  };
 
   if (m.brokeDown) {
     return order(
       'skip',
       '不开',
-      `${px} 跌破前低 ${fmtPx(m.priorLo)} 还没收回去。他这里不猜底，跌破了也不把延伸段追成空。`,
+      `${px} 跌破前低 ${fmtPx(m.priorLo)} 还没收回去。他这里先看反应：日线没收回就不猜底，也不把延伸段追成空。`,
       `收回 ${fmtPx(m.priorLo)} 再谈多`,
       `反抽 ${fmtPx(m.ema21)} 失败才再谈空`,
     );
@@ -370,14 +645,23 @@ export function ronnieRead(raw) {
     );
   }
 
-  if (nearLow && m.lowTests >= 2 && held && speedOk && forceOk) {
+  if (sweptLow && m.lowTests < 2) {
     return order(
+      'wait',
+      '等收盘',
+      `${px} 扎破前低 ${fmtPx(m.priorLo)} 又收回来。他要先看这一扎算不算破，第一脚不直接当支撑做多。`,
+      '再测一次并收在前低上方，才谈多',
+      `收盘留在 ${fmtPx(m.priorLo)} 下方`,
+    );
+  }
+  if (nearLow && m.lowTests >= 2 && held && speedOk && forceOk) {
+    return altLong(order(
       'long',
       '试多',
       `${px} 是近 8 根里第 ${m.lowTests} 次碰到 20 日低点 ${lo}，而且收住了。位置、收盘、跌速都在他要的范围里，第一脚他是不做的。`,
       `收盘守住 ${lo}`,
       `收盘跌破 ${lo}`,
-    );
+    ));
   }
   if (nearLow && m.lowTests < 2) {
     return order(
@@ -389,22 +673,24 @@ export function ronnieRead(raw) {
     );
   }
   if (nearLow && !held) {
+    const swept = m.lowTests >= 2 ? `近 8 根已经反复扫过 ${m.lowTests} 次，` : '';
+    const fast = m.dayChg <= -0.045 ? `这根跌了 ${(m.dayChg * 100).toFixed(1)}%，太快。` : '';
     return order(
       'wait',
       '等收盘',
-      `${px} 位置到了 ${lo} 附近，收盘没接住，或者这根跌得太快（${(m.dayChg * 100).toFixed(1)}%，量能 ${m.volRatio.toFixed(2)} 倍）。三个条件没齐。`,
+      `${px} ${swept}靠近 ${lo}，收盘没接住。${fast}量能 ${m.volRatio.toFixed(2)} 倍。支撑反复扫也不等于已经破，他要看反应。`,
       '收盘回到今日上半部，跌速别超过大约 4.5%',
       `收盘跌破 ${lo}`,
     );
   }
   if (halfHold && m.midTests >= 2) {
-    return order(
+    return altLong(order(
       'long',
       '试多',
       `${px} 第二次回到半分 ${fmtPx(midPx)} 并收住。他做的是这个位置的确认，不是看到阳线就追。`,
       `收盘守在 ${fmtPx(midPx)} 上方`,
       `收盘跌回 ${fmtPx(midPx)} 下方`,
-    );
+    ));
   }
   if (halfHold) {
     return order(
@@ -422,6 +708,15 @@ export function ronnieRead(raw) {
       `${px} 跌破 21 日均线 ${fmtPx(m.ema21)} 之后又抽回去、没站住。这是他写过的跌破后回踩，不是延伸段里去追空。`,
       `收盘仍在 ${fmtPx(m.ema21)} 下方`,
       `收盘站上 ${fmtPx(m.ema21)}`,
+    );
+  }
+  if (m.highTests >= 2 && !m.bullish && m.closePos <= 0.42 && m.pos20 >= 0.55 && !nearHigh) {
+    return order(
+      'short',
+      '试空',
+      `${px} 又一次从高点收回（近 8 根碰到上沿 ${m.highTests} 次），收在今日下半部。他把这种反复冲高回落看成震荡要转向，不当蓄势去接。`,
+      `收盘留在 ${hi} 下方`,
+      `收盘站上 ${hi}`,
     );
   }
   if (highFail && m.highTests >= 2) {
@@ -489,6 +784,12 @@ export function ronnieRead(raw) {
   );
 }
 
+export function ronnieRead(raw, ctx = {}) {
+  const m = withExt({ ...raw });
+  const h4 = ctx.h4 ? withExt({ ...ctx.h4 }) : null;
+  return applyFrames(ronnieDaily(m, ctx), m, h4, 'ronnie');
+}
+
 function esc(s) {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -511,6 +812,8 @@ function cardHtml(m, read) {
       <span class="cs-px">${fmtPx(m.last)}</span>
       <span class="strategy-tag ${tagClass(read.signal)}">${esc(read.label)}</span>
     </div>
+    <p class="cs-tf"><b>日线</b> ${esc(read.daily || '')}</p>
+    <p class="cs-tf"><b>4小时</b> ${esc(read.h4 || '')}</p>
     <p>${esc(read.why)}</p>
     <p class="cs-levels">触发 ${esc(read.trigger)} · 失效 ${esc(read.invalid)}</p>
   </div>`;
@@ -530,15 +833,23 @@ function stripHtml(reads) {
   return `今天可开 ${chips.join('')}${waitText}`;
 }
 
-async function fetchKlines(coin) {
+async function fetchKlines(coin, interval) {
   const root = coin.futures
     ? 'https://fapi.binance.com/fapi/v1/klines'
     : 'https://api.binance.com/api/v3/klines';
-  const res = await fetch(`${root}?symbol=${coin.pair}&interval=1d&limit=90`);
-  if (!res.ok) throw new Error(`${coin.sym} ${res.status}`);
+  const limit = interval === '4h' ? 120 : 90;
+  const res = await fetch(`${root}?symbol=${coin.pair}&interval=${interval}&limit=${limit}`);
+  if (!res.ok) throw new Error(`${coin.sym} ${interval} ${res.status}`);
   const rows = await res.json();
-  if (!Array.isArray(rows) || rows.length < 60) throw new Error(`${coin.sym} K 线不够`);
-  return structureFromKlines(coin.sym, rows);
+  if (!Array.isArray(rows) || rows.length < 60) throw new Error(`${coin.sym} ${interval} K 线不够`);
+  return structureFromKlines(coin.sym, rows, Date.now(), interval);
+}
+
+function paintStudyMeta() {
+  const zxhyMeta = document.getElementById('csZxhyMeta');
+  const ronnieMeta = document.getElementById('csRonnieMeta');
+  if (zxhyMeta) zxhyMeta.textContent = `学到 ${STUDY.zxhy.throughDate} · 上次 ${STUDY.zxhy.previousDate}`;
+  if (ronnieMeta) ronnieMeta.textContent = `学到 ${STUDY.ronnie.throughDate} · 上次 ${STUDY.ronnie.previousDate}`;
 }
 
 let busy = false;
@@ -554,20 +865,25 @@ export async function loadCreatorStudy() {
   const ronnieBox = document.getElementById('csRonnieCards');
   if (!zxhyBox || !ronnieBox) return;
   busy = true;
+  paintStudyMeta();
   if (badge) badge.textContent = '正在重算…';
   try {
     const settled = await Promise.all(COINS.map(async (coin) => {
       try {
-        return { ok: true, m: await fetchKlines(coin) };
+        const [m, h4] = await Promise.all([
+          fetchKlines(coin, '1d'),
+          fetchKlines(coin, '4h').catch(() => null),
+        ]);
+        return { ok: true, m, h4 };
       } catch (err) {
         return { ok: false, sym: coin.sym, err };
       }
     }));
-    const good = settled.filter((r) => r.ok).map((r) => r.m);
+    const good = settled.filter((r) => r.ok);
     const failed = settled.filter((r) => !r.ok);
-    const btc = good.find((m) => m.sym === 'BTC');
-    const zxhy = good.map((m) => ({ m, read: zxhyRead(m, { btc }) }));
-    const ronnie = good.map((m) => ({ m, read: ronnieRead(m, { btc }) }));
+    const btc = good.map((r) => r.m).find((m) => m.sym === 'BTC');
+    const zxhy = good.map((r) => ({ m: r.m, read: zxhyRead(r.m, { btc, h4: r.h4 }) }));
+    const ronnie = good.map((r) => ({ m: r.m, read: ronnieRead(r.m, { btc, h4: r.h4 }) }));
     document.getElementById('csZxhyOrders').innerHTML = stripHtml(zxhy);
     document.getElementById('csRonnieOrders').innerHTML = stripHtml(ronnie);
     zxhyBox.innerHTML = zxhy.map(({ m, read }) => cardHtml(m, read)).join('');
@@ -579,12 +895,14 @@ export async function loadCreatorStudy() {
     const stamp = new Date().toLocaleString('zh-CN', {
       timeZone: 'Asia/Shanghai', hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
     });
-    const open = good.some((m) => m.candleOpen);
-    if (badge) badge.textContent = `实时重算 · ${stamp}${open ? ' · 日K未收盘' : ''}`;
+    const openDay = good.some((r) => r.m.candleOpen);
+    const openH4 = good.some((r) => r.h4 && r.h4.candleOpen);
+    const openNote = [openDay ? '日K未收盘' : '', openH4 ? '4小时未收盘' : ''].filter(Boolean).join(' · ');
+    if (badge) badge.textContent = `实时重算 · ${stamp}${openNote ? ` · ${openNote}` : ''}`;
     const nOrder = [...zxhy, ...ronnie].filter((r) => r.read.signal === 'long' || r.read.signal === 'short').length;
     const foot = document.getElementById('csFoot');
     if (foot) {
-      foot.textContent = `刚才这轮两边合计 ${nOrder} 个试多/试空。日 K 来自币安现货，黄金用 U 本位。未收盘的日 K 下一分钟可能从「等收盘」变成「试多」或退回「不开」。不构成下单指令。`;
+      foot.textContent = `刚才这轮两边合计 ${nOrder} 个试多/试空。日线定结构，4小时定反应，两层不一致就从开单退回等收盘。K 线来自币安现货，黄金用 U 本位。未收盘的日 K 和 4 小时都会变。不构成下单指令。`;
     }
   } catch (err) {
     if (badge) badge.textContent = '这次没算成';
