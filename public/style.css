@@ -33,6 +33,7 @@ body {
   max-width: 1400px;
   margin: 0 auto;
   padding: 16px;
+  overflow-x: clip;
 }
 
 .header {
@@ -1156,6 +1157,54 @@ body {
 
 .ema-qual-miss.is-ok {
   color: var(--teal);
+}
+
+.strategy-tag.burst {
+  color: var(--amber);
+  border-color: rgba(210, 153, 34, 0.55);
+  background: rgba(210, 153, 34, 0.12);
+}
+
+.sr-box {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sr-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 6px;
+}
+
+.sr-note {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+.sr-tf + .sr-tf {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.sr-tf-h {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.sr-tf p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
 }
 
 .macd-bars {
@@ -2952,7 +3001,17 @@ a.signal-token-symbol:hover {
 }
 
 @media (max-width: 900px) {
-  .price-bar { grid-template-columns: repeat(4, 1fr); }
+  .price-bar { grid-template-columns: repeat(3, 1fr); }
+  .header-left { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .subtitle { margin-left: 0; }
+  .header-right { flex-wrap: wrap; }
+  .ema-board, .creator-study, .pb80-section, .valuescan-section { padding: 12px; }
+  .ema-notify { margin-left: 0; width: 100%; }
+  .ema-notify-status { max-width: 100%; }
+  .ema-chip-row { flex-direction: column; align-items: stretch; }
+  .ema-chip, .sr-note, .ema-board-lead, .sr-tf p { overflow-wrap: anywhere; }
+  .ema-chip, .sr-box, .sr-tf, .sr-tf-h { max-width: 100%; min-width: 0; }
+  .macd-bars { max-width: 100%; flex-wrap: wrap; height: auto; }
   .main-grid, .lower-grid, .short-grid, .sc-tf-grid, .sc-sr, .pb80-grid { grid-template-columns: 1fr; }
   .signal-cards { grid-template-columns: 1fr; }
   .ema-cards { grid-template-columns: 1fr; }
@@ -2978,8 +3037,18 @@ a.signal-token-symbol:hover {
 }
 
 @media (max-width: 500px) {
-  .price-bar { grid-template-columns: repeat(2, 1fr); }
+  #app { padding: 12px 10px; }
+  .price-bar { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .price-card { padding: 8px 10px; }
+  .coin-price { font-size: 16px; }
   .header { flex-direction: column; gap: 8px; align-items: flex-start; }
+  .header h1 { font-size: 18px; }
+  .last-update { white-space: normal; }
+  .ema-board, .creator-study, .pb80-section, .valuescan-section { padding: 12px 10px; }
+  .gold-bar { overflow: visible; }
+  .gold-stat { flex: 1 1 46%; min-width: 0; padding: 8px 10px; }
+  .gold-stat-label { letter-spacing: 0; white-space: normal; }
+  .gold-stat-value { font-size: 14px; overflow-wrap: anywhere; }
   .signal-cards { grid-template-columns: 1fr; }
   .signal-card-score { flex-direction: column; align-items: stretch; }
   .score-main { flex-direction: row; }

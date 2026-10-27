@@ -1585,7 +1585,8 @@ function macdKdjBgHtml(board, coin) {
     const vol = hv && hv.label
       ? `量${hv.label}${Number.isFinite(hv.ratio) ? ' ' + hv.ratio.toFixed(2) + 'x' : ''}`
       : '';
-    label4 = [`4h ${mid}`, dist, zone, vol, htfMkTail(h4)].filter(Boolean).join(' · ');
+    const burst = h4.sr && h4.sr.volumeBurst ? '爆量' : '';
+    label4 = [`4h ${mid}`, dist, zone, vol, burst, htfMkTail(h4)].filter(Boolean).join(' · ');
   }
 
   let label1;
@@ -1759,7 +1760,7 @@ function renderEmaTfCol(tf, row) {
       ${emaMetric('中轴', bollMidHtml(row.bollMid))}
       ${emaMetric('MK', macdKdjHtml(mk))}
       ${emaMetric('KC', keltnerHtml(kc))}
-      ${row.volume ? emaMetric('量', volHtml(row.volume)) : ''}
+      ${row.volume ? emaMetric('量', volHtml(row.volume) + (row.sr && row.sr.volumeBurst ? '<span class="strategy-tag burst">爆量</span>' : '')) : ''}
     </div>
     ${mkHint}${bbHint}${midHint}
   </div>`;
@@ -1807,6 +1808,59 @@ function renderQualPanel(data, coin) {
   </div>`;
 }
 
+function srPx(n) {
+  return fmtBand(n);
+}
+
+function srPlace(n) {
+  if (!Number.isFinite(n)) return '';
+  const abs = Math.abs(n).toFixed(2) + '%';
+  return n >= 0 ? `上方 ${abs}` : `下方 ${abs}`;
+}
+
+function renderSrTf(tf, sr) {
+  if (!sr) {
+    return `<div class="sr-tf"><div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="ema-muted">K 线还不够确认拐点</span></div></div>`;
+  }
+  const supCls = (sr.supportState === 'broke' || sr.supportState === 'broke-burst' || sr.supportState === 'failed')
+    ? 'short'
+    : sr.supportState === 'hold' ? 'long' : 'watch';
+  const resCls = (sr.resistanceState === 'broke' || sr.resistanceState === 'broke-burst' || sr.resistanceState === 'cleared')
+    ? 'long'
+    : 'watch';
+  const osc = Number.isFinite(sr.volOsc) ? `${sr.volOsc > 0 ? '+' : ''}${sr.volOsc.toFixed(0)}` : '--';
+  const burst = sr.volumeBurst
+    ? `<span class="strategy-tag burst">爆量 ${osc}</span>`
+    : `<span class="strategy-tag watch">${sr.volumeLabel} ${osc}</span>`;
+  const cross = sr.cross === 'golden'
+    ? '<span class="strategy-tag long">EMA10/30 金叉</span>'
+    : sr.cross === 'death'
+      ? '<span class="strategy-tag short">EMA10/30 死叉</span>'
+      : `<span class="ema-meta">${sr.trendLabel}</span>`;
+  const age = (n) => (Number.isFinite(n) ? `，这个点在 ${n} 根前` : '');
+  const supLine = sr.support == null
+    ? '支撑还没确认。'
+    : `支撑 ${srPx(sr.support)} · 现价在${srPlace(sr.supportDist)}${age(sr.supportAge)}`;
+  const resLine = sr.resistance == null
+    ? '阻力还没确认。'
+    : `阻力 ${srPx(sr.resistance)} · 现价在${srPlace(sr.resistanceDist)}${age(sr.resistanceAge)}`;
+  return `<div class="sr-tf">
+    <div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="strategy-tag ${supCls}">${sr.supportLabel}</span><span class="strategy-tag ${resCls}">${sr.resistanceLabel}</span>${burst}${cross}</div>
+    <p>${supLine}</p>
+    <p>${resLine}</p>
+  </div>`;
+}
+
+function renderSrPanel(data, coin) {
+  const h1 = data && data['1h'] && data['1h'][coin];
+  const h4 = data && data['4h'] && data['4h'][coin];
+  return `<div class="sr-box" aria-label="1小时和4小时结构位">
+    <div class="sr-head"><span class="ema-chip-label">结构位</span><span class="sr-note">1 小时、4 小时各看最近一个已确认拐点。爆量要量能振荡超过 20。只显示，不开单。</span></div>
+    ${renderSrTf('1h', h1 && h1.sr)}
+    ${renderSrTf('4h', h4 && h4.sr)}
+  </div>`;
+}
+
 function renderOneEmaCard(data, coin, kind = 'fixed', meta = null) {
   const r1m = data && data['1m'] && data['1m'][coin];
   const r5m = data && data['5m'] && data['5m'][coin];
@@ -1851,6 +1905,7 @@ function renderOneEmaCard(data, coin, kind = 'fixed', meta = null) {
       </div>
     </div>
     ${macdKdjBgHtml(data, coin)}
+    ${renderSrPanel(data, coin)}
     ${renderQualPanel(data, coin)}
     ${pb80StripHtml(getStrategySymbolMap()[coin])}
     <div class="ema-tf-stack">

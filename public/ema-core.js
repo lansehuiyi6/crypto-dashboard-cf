@@ -1920,6 +1920,7 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   ema.keltner = evaluateDualKeltnerReversion(klines, ema.coin, { ...opts, adx: ema.adx });
   ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
   ema.volume = evaluateVolumePulse(klines, { interval: opts.interval || '1h', volMaLen: 15 });
+  ema.sr = evaluatePivotSr(klines, opts);
   // 迷你走势：最近收盘（用于卡片火花线，不删指标信息）
   const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
   ema.spark = closes.filter((v) => Number.isFinite(v)).slice(-48);
@@ -2037,6 +2038,178 @@ export function evaluateVolumePulse(klines, opts = {}) {
   };
 }
 
+function barOHLCV(row) {
+  if (!row) return null;
+  if (Array.isArray(row)) {
+    return { o: Number(row[1]), h: Number(row[2]), l: Number(row[3]), c: Number(row[4]), v: Number(row[5]) };
+  }
+  return {
+    o: Number(row.o ?? row.open),
+    h: Number(row.h ?? row.high),
+    l: Number(row.l ?? row.low),
+    c: Number(row.c ?? row.close),
+    v: Number(row.v ?? row.volume),
+  };
+}
+
+function emaSpan(values, span) {
+  const out = new Array(values.length);
+  if (!values.length) return out;
+  const k = 2 / (span + 1);
+  let e = values[0];
+  out[0] = e;
+  for (let i = 1; i < values.length; i++) {
+    e = values[i] * k + e * (1 - k);
+    out[i] = e;
+  }
+  return out;
+}
+
+/**
+ * 图上那套结构位。EMA10/30 只做过滤，左右各 15 根确认拐点。
+ * 量能振荡 = 100 * (量 EMA5 − 量 EMA10) / 量 EMA10，超过 20 才叫爆量。
+ * 只读已经收盘的 K 线，不改开仓。
+ */
+export function evaluatePivotSr(klines, opts = {}) {
+  const left = Math.max(1, intParam(opts.leftBars, 15));
+  const right = Math.max(1, intParam(opts.rightBars, 15));
+  const fastP = Math.max(2, intParam(opts.fastPeriod, 10));
+  const slowP = Math.max(fastP + 1, intParam(opts.slowPeriod, 30));
+  const volTh = Number.isFinite(Number(opts.volumeThreshold)) ? Number(opts.volumeThreshold) : 20;
+  const useEma = opts.useEmaFilter !== false;
+  const bars = [];
+  for (const row of klines || []) {
+    const b = barOHLCV(row);
+    if (!b || ![b.o, b.h, b.l, b.c].every(Number.isFinite)) continue;
+    bars.push(b);
+  }
+  const n = bars.length;
+  const i = n - 2;
+  if (i < left + right + 2) return null;
+  const closes = bars.map((b) => b.c);
+  const vols = bars.map((b) => (Number.isFinite(b.v) && b.v > 0 ? b.v : 0));
+  const emaFast = emaSpan(closes, fastP);
+  const emaSlow = emaSpan(closes, slowP);
+  const volShort = emaSpan(vols, 5);
+  const volLong = emaSpan(vols, 10);
+  const pivotHighAt = new Array(n).fill(null);
+  const pivotLowAt = new Array(n).fill(null);
+  for (let t = left + right; t <= i; t++) {
+    const p = t - right;
+    let leftHigh = -Infinity;
+    let leftLow = Infinity;
+    for (let k = p - left; k < p; k++) {
+      if (bars[k].h > leftHigh) leftHigh = bars[k].h;
+      if (bars[k].l < leftLow) leftLow = bars[k].l;
+    }
+    let rightHigh = -Infinity;
+    let rightLow = Infinity;
+    for (let k = p + 1; k <= t; k++) {
+      if (bars[k].h > rightHigh) rightHigh = bars[k].h;
+      if (bars[k].l < rightLow) rightLow = bars[k].l;
+    }
+    if (bars[p].h >= leftHigh && bars[p].h > rightHigh) pivotHighAt[t] = bars[p].h;
+    if (bars[p].l <= leftLow && bars[p].l < rightLow) pivotLowAt[t] = bars[p].l;
+  }
+  const useHigh = new Array(n).fill(null);
+  const useLow = new Array(n).fill(null);
+  let hh = null;
+  let ll = null;
+  for (let t = 0; t < n; t++) {
+    useHigh[t] = hh;
+    useLow[t] = ll;
+    if (pivotHighAt[t] != null) hh = pivotHighAt[t];
+    if (pivotLowAt[t] != null) ll = pivotLowAt[t];
+  }
+  const prev = i - 1;
+  const sup = useLow[i];
+  const res = useHigh[i];
+  const supPrev = useLow[prev];
+  const resPrev = useHigh[prev];
+  const c = bars[i].c;
+  const cPrev = bars[prev].c;
+  const o = bars[i].o;
+  const h = bars[i].h;
+  const l = bars[i].l;
+  const longE = volLong[i];
+  const volOsc = longE ? (100 * (volShort[i] - longE)) / longE : null;
+  const volumeBurst = volOsc != null && volOsc > volTh;
+  const bull = emaFast[i] > emaSlow[i];
+  const bear = emaFast[i] < emaSlow[i];
+  const golden = bull && emaFast[prev] <= emaSlow[prev];
+  const death = bear && emaFast[prev] >= emaSlow[prev];
+  const bullWick = (o - l) > (c - o);
+  const bearWick = (o - c) < (h - o);
+  const crossOver = res != null && resPrev != null && c > res && cPrev <= resPrev;
+  const crossUnder = sup != null && supPrev != null && c < sup && cPrev >= supPrev;
+  const supportBreak = crossUnder && !bearWick && volumeBurst && (!useEma || bear);
+  const resistanceBreak = crossOver && !bullWick && volumeBurst && (!useEma || bull);
+
+  function ageOf(arr) {
+    for (let k = i - 1; k >= 0; k--) {
+      if (arr[k] != null) return i - (k - right);
+    }
+    return null;
+  }
+  const supportAge = sup == null ? null : ageOf(pivotLowAt);
+  const resistanceAge = res == null ? null : ageOf(pivotHighAt);
+  const dist = (level) => (level ? ((c / level) - 1) * 100 : null);
+
+  let supportState = 'none';
+  if (sup != null) {
+    if (supportBreak) supportState = 'broke-burst';
+    else if (crossUnder && bearWick) supportState = 'wick';
+    else if (crossUnder) supportState = 'broke';
+    else if (c < sup) supportState = 'failed';
+    else supportState = 'hold';
+  }
+  let resistanceState = 'none';
+  if (res != null) {
+    if (resistanceBreak) resistanceState = 'broke-burst';
+    else if (crossOver && bullWick) resistanceState = 'wick';
+    else if (crossOver) resistanceState = 'broke';
+    else if (c > res) resistanceState = 'cleared';
+    else resistanceState = 'hold';
+  }
+
+  const supportLabel = {
+    none: '无支撑',
+    hold: '支撑有效',
+    wick: '影线扫支撑',
+    broke: '收盘跌破',
+    'broke-burst': '爆量跌破',
+    failed: '支撑已破',
+  }[supportState];
+  const resistanceLabel = {
+    none: '无阻力',
+    hold: '阻力未破',
+    wick: '影线试阻力',
+    broke: '收盘突破',
+    'broke-burst': '爆量突破',
+    cleared: '阻力已破',
+  }[resistanceState];
+
+  return {
+    support: sup,
+    resistance: res,
+    supportDist: dist(sup),
+    resistanceDist: dist(res),
+    supportAge,
+    resistanceAge,
+    supportState,
+    resistanceState,
+    supportLabel,
+    resistanceLabel,
+    volOsc,
+    volumeBurst,
+    volumeLabel: volOsc == null ? '量能不够算' : volumeBurst ? '爆量' : '量能未到爆量',
+    trend: bull ? 'long' : bear ? 'short' : 'flat',
+    trendLabel: bull ? 'EMA10 在 EMA30 上' : bear ? 'EMA10 在 EMA30 下' : 'EMA10 贴着 EMA30',
+    cross: golden ? 'golden' : death ? 'death' : null,
+    close: c,
+  };
+}
+
 export function formatMacdHist(h) {
   if (!Number.isFinite(h)) return '--';
   const a = Math.abs(h);
@@ -2121,6 +2294,7 @@ export function evaluateHtfContext(klines, coin = '', opts = {}) {
   const distPct = ema ? distPctToEma56(ema.price, ema.ema56) : null;
   const mid = htfMidState(ema, bb, distPct);
   const vol = evaluateVolumePulse(klines, { interval, volMaLen: 20 });
+  const sr = evaluatePivotSr(klines, opts);
   let st = htfStance(ema, mk, adx);
   let weeklyMacd = null;
   if (interval === '1w') {
@@ -2143,6 +2317,7 @@ export function evaluateHtfContext(klines, coin = '', opts = {}) {
   };
   mk.adx = adx;
   mk.volume = vol;
+  mk.sr = sr;
   mk.weeklyMacd = weeklyMacd;
   return mk;
 }
