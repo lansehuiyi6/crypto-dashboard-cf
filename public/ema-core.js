@@ -521,6 +521,92 @@ function macdStrongThreshold(close) {
   return Math.max(Math.abs(close) * 0.00005, 1e-8);
 }
 
+/** 排列顺序 + EMA7/21 最近一次金叉或死叉。不改 trend / 开仓。 */
+function describeEmaShape(d7, d21, d56, ema7, ema21, i, interval) {
+  const strictLong = d7 > d21 && d21 > d56;
+  const strictShort = d7 < d21 && d21 < d56;
+  const bothAbove = d7 > d56 && d21 > d56;
+  const bothBelow = d7 < d56 && d21 < d56;
+  let stack = 'mixed';
+  let stackLabel = '均线纠缠';
+  let order = '7、21、56 没有排开';
+  if (strictLong) {
+    stack = 'long';
+    stackLabel = '多头排列';
+    order = '7>21>56';
+  } else if (strictShort) {
+    stack = 'short';
+    stackLabel = '空头排列';
+    order = '7<21<56';
+  } else if (bothAbove && d21 > d7) {
+    stack = 'long';
+    stackLabel = '多头排列';
+    order = '21>7>56';
+  } else if (bothBelow && d7 > d21) {
+    stack = 'short';
+    stackLabel = '空头排列';
+    order = '21<7<56';
+  } else if (d7 > d21) {
+    stackLabel = '7在21上';
+    order = emaOrderHighToLow(d7, d21, d56);
+  } else if (d7 < d21) {
+    stackLabel = '7在21下';
+    order = emaOrderHighToLow(d7, d21, d56);
+  } else {
+    order = emaOrderHighToLow(d7, d21, d56);
+  }
+  const raw = findLastCross(ema7, ema21, i);
+  const cross21 = raw ? {
+    dir: raw.dir,
+    label: raw.dir === 'up' ? '金叉7/21' : '死叉7/21',
+    barsAgo: i - raw.index,
+    timeAgoText: formatAgo(i - raw.index, interval),
+  } : null;
+  return { stack, stackLabel, order, cross21 };
+}
+
+function partialEmaShape(klines, interval) {
+  const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
+  if (closes.length < 21) return null;
+  const ema7 = calcEMA(closes, 7);
+  const ema21 = calcEMA(closes, 21);
+  if (!ema7 || !ema21) return null;
+  const i = closes.length - 1;
+  const d7 = ema7[i];
+  const d21 = ema21[i];
+  if (d7 == null || d21 == null) return null;
+  const raw = findLastCross(ema7, ema21, i);
+  const cross21 = raw ? {
+    dir: raw.dir,
+    label: raw.dir === 'up' ? '金叉7/21' : '死叉7/21',
+    barsAgo: i - raw.index,
+    timeAgoText: formatAgo(i - raw.index, interval),
+  } : null;
+  let stackLabel = '均线纠缠';
+  let order = '7=21';
+  if (d7 > d21) {
+    stackLabel = '7在21上';
+    order = '7>21';
+  } else if (d7 < d21) {
+    stackLabel = '7在21下';
+    order = '7<21';
+  }
+  return { stack: 'mixed', stackLabel, order, cross21, note: '56还不够' };
+}
+
+function emaOrderHighToLow(d7, d21, d56) {
+  const items = [
+    { k: '7', v: d7 },
+    { k: '21', v: d21 },
+    { k: '56', v: d56 },
+  ].sort((a, b) => (b.v - a.v) || (a.k < b.k ? -1 : 1));
+  let text = items[0].k;
+  for (let n = 1; n < items.length; n++) {
+    text += (items[n].v === items[n - 1].v ? '=' : '>') + items[n].k;
+  }
+  return text;
+}
+
 export function evaluateEmaTrendStrategy(klines, coin = '', opts = {}) {
   const interval = opts.interval || '1h';
   const valueKind = opts.valueKind || 'usd';
@@ -613,6 +699,8 @@ export function evaluateEmaTrendStrategy(klines, coin = '', opts = {}) {
     trendLabel = '空头排列 7/21<56';
   }
 
+  const emaShape = describeEmaShape(d7, d21, d56, ema7, ema21, i, interval);
+
   const stopLoss = setup === 'short' ? close * (1 + STOP_PCT / 100) : close * (1 - STOP_PCT / 100);
   const takeProfit = setup === 'short' ? close * (1 - TAKE_PCT / 100) : close * (1 + TAKE_PCT / 100);
 
@@ -642,6 +730,7 @@ export function evaluateEmaTrendStrategy(klines, coin = '', opts = {}) {
     macdAboveZero,
     trend,
     trendLabel,
+    emaShape,
     setup,
     setupLabel,
     lastSignal,
@@ -2308,6 +2397,7 @@ export function evaluateHtfContext(klines, coin = '', opts = {}) {
     ...st,
     emaTrend: ema ? ema.trend : null,
     emaTrendLabel: ema ? ema.trendLabel : '',
+    emaShape: ema ? ema.emaShape : partialEmaShape(klines, interval),
     price: ema ? ema.price : null,
     ema56: ema ? ema.ema56 : null,
     bb,

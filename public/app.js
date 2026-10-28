@@ -1586,7 +1586,8 @@ function macdKdjBgHtml(board, coin) {
       ? `量${hv.label}${Number.isFinite(hv.ratio) ? ' ' + hv.ratio.toFixed(2) + 'x' : ''}`
       : '';
     const burst = h4.sr && h4.sr.volumeBurst ? '爆量' : '';
-    label4 = [`4h ${mid}`, dist, zone, vol, burst, htfMkTail(h4)].filter(Boolean).join(' · ');
+    const shape = h4h && h4h.emaShape ? emaShapeHtml(h4h.emaShape) : '';
+    label4 = [shape, `4h ${mid}`, dist, zone, vol, burst, htfMkTail(h4)].filter(Boolean).join(' · ');
   }
 
   let label1;
@@ -1596,8 +1597,8 @@ function macdKdjBgHtml(board, coin) {
     const env = d1.overbought && d1.macdBull ? '日线多头但KDJ超买' : d1.macdBull ? '日线多头环境' : '日线空头环境';
     const stance = d1h && d1h.stanceLabel ? d1h.stanceLabel : '';
     const adx = d1h && d1h.adx ? `ADX${d1h.adx.adx.toFixed(0)}${d1h.adx.regimeLabel}` : '';
-    const ema = d1h && d1h.emaTrendLabel ? d1h.emaTrendLabel : '';
-    label1 = [mk, stance, env, ema, adx].filter(Boolean).join(' · ');
+    const shape = d1h && d1h.emaShape ? emaShapeHtml(d1h.emaShape) : (d1h && d1h.emaTrendLabel ? escText(d1h.emaTrendLabel) : '');
+    label1 = [shape, mk, stance, env, adx].filter(Boolean).join(' · ');
   }
 
   let labelW = '';
@@ -1611,21 +1612,23 @@ function macdKdjBgHtml(board, coin) {
       const vol = wv && wv.label
         ? `周量${wv.label}${Number.isFinite(wv.ratio) ? ' ' + wv.ratio.toFixed(2) + 'x' : ''}`
         : '';
-      labelW = [`1w ${wb.stanceLabel}`, closed, forming, vol].filter(Boolean).join(' · ');
+      const shape = w1h && w1h.emaShape ? emaShapeHtml(w1h.emaShape) : '';
+      labelW = [shape, `1w ${wb.stanceLabel}`, closed, forming, vol].filter(Boolean).join(' · ');
       wBars = macdBarsHtml(wb.histSpark);
     } else {
       const mk = w1.overbought ? '1w 超买' : w1.macdBull ? '1w 多头' : '1w 空头';
       const stance = w1h && w1h.stanceLabel ? w1h.stanceLabel : '';
       const adx = w1h && w1h.adx ? `ADX${w1h.adx.adx.toFixed(0)}${w1h.adx.regimeLabel}` : '';
-      labelW = [mk, stance, adx].filter(Boolean).join(' · ');
+      const shape = w1h && w1h.emaShape ? emaShapeHtml(w1h.emaShape) : '';
+      labelW = [shape, mk, stance, adx].filter(Boolean).join(' · ');
       wBars = macdBarsHtml(w1.histSpark);
     }
   }
 
   const chips = [
-    w1 ? `<span class="ema-chip ${htfChipClass(w1)}" title="1w 用上一根已收盘周K的 MACD(12,26,9) 柱：>0 偏多只开多，<0 偏空只开空">${labelW}${wBars}</span>` : '',
-    `<span class="ema-chip ${htfChipClass(d1)}" title="1d 大背景：趋势还是震荡">${label1}</span>`,
-    `<span class="ema-chip ${htfChipClass(h4)}" title="4h 中期：强势多/多头走弱/超跌偏空">${label4}</span>`,
+    w1 ? `<span class="ema-chip ${htfChipClass(w1)}" title="1w 先看 EMA7/21/56 排列和 7/21 金叉或死叉，方向仍用上一根已收盘周K的 MACD 柱">${labelW}${wBars}</span>` : '',
+    `<span class="ema-chip ${htfChipClass(d1)}" title="1d 先看排列和 7/21 金叉或死叉，再看趋势还是震荡">${label1}</span>`,
+    `<span class="ema-chip ${htfChipClass(h4)}" title="4h 先看排列和 7/21 金叉或死叉，再看强势多/多头走弱/超跌偏空">${label4}</span>`,
   ].filter(Boolean).join('');
 
   return `<div class="ema-chip-row" aria-label="大周期背景">
@@ -1657,6 +1660,29 @@ function escAttr(s) {
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;');
+}
+
+function escText(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function emaShapeHtml(shape) {
+  if (!shape) return '<span class="ema-muted">形态未算</span>';
+  const cls = shape.stack === 'long' ? 'long' : shape.stack === 'short' ? 'short' : 'watch';
+  const order = shape.order ? `<span class="ema-meta">${escText(shape.order)}</span>` : '';
+  const cross = shape.cross21
+    ? goldCrossHtml(shape.cross21)
+    : '<span class="ema-muted">近期未见 7/21 金叉/死叉</span>';
+  const note = shape.note ? `<span class="ema-muted">${escText(shape.note)}</span>` : '';
+  return [
+    `<span class="strategy-tag ${cls}">${escText(shape.stackLabel)}</span>`,
+    order,
+    cross,
+    note,
+  ].filter(Boolean).join('<span class="ema-meta"> · </span>');
 }
 
 function emaMetric(label, valueHtml) {
@@ -1719,7 +1745,7 @@ function renderLtfCol(tf, row) {
     </div>
     ${reason}
     <div class="ema-metrics">
-      ${emaMetric('金叉', goldCrossHtml(row.goldCross))}
+      ${emaMetric('形态', emaShapeHtml(row.emaShape))}
       ${emaMetric('穿越', emaCrossHtml(row.lastSignal))}
       ${emaMetric('分界', ema56PosHtml(row))}
       ${emaMetric('布林', bbHtml(row.bb))}
@@ -1752,6 +1778,7 @@ function renderEmaTfCol(tf, row) {
     </div>
     ${reason}
     <div class="ema-metrics">
+      ${emaMetric('形态', emaShapeHtml(row.emaShape))}
       ${emaMetric('穿越', emaCrossHtml(ls))}
       ${emaMetric('过滤', emaFilterText(row))}
       ${emaMetric('AT', alphaHtml(row.alpha))}
