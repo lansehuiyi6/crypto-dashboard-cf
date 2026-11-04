@@ -460,6 +460,14 @@ function initTempPairUi() {
       e.preventDefault();
       removeTempPair(rem.getAttribute('data-temp-remove'));
     });
+    box.addEventListener('toggle', (e) => {
+      const fold = e.target;
+      if (!(fold instanceof HTMLDetailsElement)) return;
+      const coin = fold.getAttribute('data-sr-fold');
+      if (!coin) return;
+      if (fold.open) expandedSrCopy.add(coin);
+      else expandedSrCopy.delete(coin);
+    }, true);
   }
 }
 
@@ -1748,7 +1756,10 @@ function renderLtfCol(tf, row) {
   return `<div class="ema-tf-col ema-ltf-col dir-${dir}">
     <div class="ema-tf-head">
       <span class="ema-tf-id"><span class="ema-tf">${tf}</span><span class="ema-role">${role}</span></span>
-      ${combinedHtml(row)}
+      <span class="ema-tf-head-right">
+        ${combinedHtml(row)}
+        ${tf === '1m' && row.ut ? utHtml(row.ut) : ''}
+      </span>
     </div>
     ${reason}
     <div class="ema-metrics">
@@ -1759,7 +1770,6 @@ function renderLtfCol(tf, row) {
       ${row.bb ? emaMetric('轨道', bbRailsHtml(row.bb)) : ''}
       ${mk ? emaMetric('MK', mkLine) : ''}
       ${row.volume ? emaMetric('量', volHtml(row.volume)) : ''}
-      ${tf === '1m' && row.ut ? emaMetric('UT', utHtml(row.ut)) : ''}
     </div>
   </div>`;
 }
@@ -1880,16 +1890,50 @@ function srPlace(n) {
   return n >= 0 ? `上方 ${abs}` : `下方 ${abs}`;
 }
 
-function renderSrTf(tf, sr, ch) {
-  if (!sr) {
-    return `<div class="sr-tf"><div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="ema-muted">K 线还不够确认拐点</span></div>${renderSrChannels(ch)}</div>`;
-  }
+function srDist(n) {
+  if (!Number.isFinite(n)) return '';
+  return (n >= 0 ? '↑' : '↓') + Math.abs(n).toFixed(2) + '%';
+}
+
+function srPiece(cls, label, px, dist, age, title) {
+  const bits = [`<span class="strategy-tag ${cls}">${label}</span>`];
+  if (px) bits.push(`<span class="sr-px">${px}</span>`);
+  if (dist) bits.push(`<span class="sr-dist">${dist}</span>`);
+  if (age) bits.push(`<span class="sr-age">${age}</span>`);
+  return `<span class="sr-piece"${title ? ` title="${escAttr(title)}"` : ''}>${bits.join('')}</span>`;
+}
+
+function srAgeText(n) {
+  return Number.isFinite(n) ? `，这个点在 ${n} 根前` : '';
+}
+
+function srPivotLines(sr) {
+  if (!sr) return ['K 线还不够确认拐点。'];
+  return [
+    sr.support == null
+      ? '支撑还没确认。'
+      : `支撑 ${srPx(sr.support)} · 现价在${srPlace(sr.supportDist)}${srAgeText(sr.supportAge)}`,
+    sr.resistance == null
+      ? '阻力还没确认。'
+      : `阻力 ${srPx(sr.resistance)} · 现价在${srPlace(sr.resistanceDist)}${srAgeText(sr.resistanceAge)}`,
+  ];
+}
+
+function srStateClass(sr) {
   const supCls = (sr.supportState === 'broke' || sr.supportState === 'broke-burst' || sr.supportState === 'failed')
     ? 'short'
     : sr.supportState === 'hold' ? 'long' : 'watch';
   const resCls = (sr.resistanceState === 'broke' || sr.resistanceState === 'broke-burst' || sr.resistanceState === 'cleared')
     ? 'long'
     : 'watch';
+  return { supCls, resCls };
+}
+
+function srHeadHtml(tf, sr) {
+  if (!sr) {
+    return `<div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="ema-muted">K 线还不够确认拐点</span></div>`;
+  }
+  const { supCls, resCls } = srStateClass(sr);
   const osc = Number.isFinite(sr.volOsc) ? `${sr.volOsc > 0 ? '+' : ''}${sr.volOsc.toFixed(0)}` : '--';
   const burst = sr.volumeBurst
     ? `<span class="strategy-tag burst">爆量 ${osc}</span>`
@@ -1899,22 +1943,62 @@ function renderSrTf(tf, sr, ch) {
     : sr.cross === 'death'
       ? '<span class="strategy-tag short">EMA10/30 死叉</span>'
       : `<span class="ema-meta">${sr.trendLabel}</span>`;
-  const age = (n) => (Number.isFinite(n) ? `，这个点在 ${n} 根前` : '');
-  const supLine = sr.support == null
-    ? '支撑还没确认。'
-    : `支撑 ${srPx(sr.support)} · 现价在${srPlace(sr.supportDist)}${age(sr.supportAge)}`;
-  const resLine = sr.resistance == null
-    ? '阻力还没确认。'
-    : `阻力 ${srPx(sr.resistance)} · 现价在${srPlace(sr.resistanceDist)}${age(sr.resistanceAge)}`;
+  return `<div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="strategy-tag ${supCls}">${sr.supportLabel}</span><span class="strategy-tag ${resCls}">${sr.resistanceLabel}</span>${burst}${cross}</div>`;
+}
+
+function renderSrTf(tf, sr, ch) {
+  if (!sr) {
+    return `<div class="sr-tf">${srHeadHtml(tf, sr)}${renderSrChannelLine(ch)}</div>`;
+  }
+  const { supCls, resCls } = srStateClass(sr);
+  const [supLine, resLine] = srPivotLines(sr);
+  const supAge = Number.isFinite(sr.supportAge) ? `${sr.supportAge}根` : '';
+  const resAge = Number.isFinite(sr.resistanceAge) ? `${sr.resistanceAge}根` : '';
   return `<div class="sr-tf">
-    <div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="strategy-tag ${supCls}">${sr.supportLabel}</span><span class="strategy-tag ${resCls}">${sr.resistanceLabel}</span>${burst}${cross}</div>
-    <p>${supLine}</p>
-    <p>${resLine}</p>
-    ${renderSrChannels(ch)}
+    ${srHeadHtml(tf, sr)}
+    <div class="sr-line"><span class="sr-k">点</span>${srPiece(supCls, '支撑', sr.support == null ? '--' : srPx(sr.support), srDist(sr.supportDist), supAge, supLine)}${srPiece(resCls, '阻力', sr.resistance == null ? '--' : srPx(sr.resistance), srDist(sr.resistanceDist), resAge, resLine)}</div>
+    ${renderSrChannelLine(ch)}
   </div>`;
 }
 
-function renderSrChannels(ch) {
+function renderSrChannelLine(ch) {
+  if (!ch) return '';
+  if (!ch.ready || !ch.channels || !ch.channels.length) {
+    return '<div class="sr-line"><span class="sr-k">带</span><span class="ema-muted">拐点还没聚成通道</span></div>';
+  }
+  const bits = [];
+  if (ch.inside && ch.insideChannel) {
+    const ic = ch.insideChannel;
+    const width = ic.high - ic.low;
+    const pos = width > 0 ? (ch.close - ic.low) / width : 0.5;
+    const place = pos <= 0.45 ? '近下沿' : pos >= 0.55 ? '近上沿' : '通道中部';
+    const copy = `价在通道内 ${srBandText(ic.low, ic.high)} · ${place}`;
+    bits.push(srPiece('watch', '价在通道内', srBandText(ic.low, ic.high), place, '', copy));
+  }
+  if (ch.nearestSup) {
+    const copy = `支撑带 ${srBandText(ch.nearestSup.low, ch.nearestSup.high)} · 现价在${srPlace(ch.nearestSup.dist)}`;
+    bits.push(srPiece('long', '支撑带', srBandText(ch.nearestSup.low, ch.nearestSup.high), srDist(ch.nearestSup.dist), '', copy));
+  }
+  if (ch.nearestRes) {
+    const copy = `阻力带 ${srBandText(ch.nearestRes.low, ch.nearestRes.high)} · 现价在${srPlace(ch.nearestRes.dist)}`;
+    bits.push(srPiece('short', '阻力带', srBandText(ch.nearestRes.low, ch.nearestRes.high), srDist(ch.nearestRes.dist), '', copy));
+  }
+  const recentRes = ch.resBroken || (ch.resBrokenAgo != null && ch.resBrokenAgo <= 2);
+  const recentSup = ch.supBroken || (ch.supBrokenAgo != null && ch.supBrokenAgo <= 2);
+  if (recentRes) {
+    const when = ch.resBroken ? '上一根收盘穿出上沿' : `${ch.resBrokenAgo} 根前收盘穿出上沿`;
+    const copy = `${when}，无量确认。`;
+    bits.push(srPiece('long', '通道试破阻力', '', ch.resBroken ? '上根' : `${ch.resBrokenAgo}根前`, '', copy));
+  }
+  if (recentSup) {
+    const when = ch.supBroken ? '上一根收盘穿出下沿' : `${ch.supBrokenAgo} 根前收盘穿出下沿`;
+    const copy = `${when}，无量确认。`;
+    bits.push(srPiece('short', '通道试破支撑', '', ch.supBroken ? '上根' : `${ch.supBrokenAgo}根前`, '', copy));
+  }
+  return `<div class="sr-line"><span class="sr-k">带</span>${bits.join('')}</div>`;
+}
+
+function renderSrCopyChannels(ch) {
   if (!ch) return '';
   if (!ch.ready || !ch.channels || !ch.channels.length) {
     return '<p class="sr-ch">拐点还没聚成通道。</p>';
@@ -1946,13 +2030,30 @@ function renderSrChannels(ch) {
   return bits.join('');
 }
 
+function renderSrCopyTf(tf, sr, ch) {
+  const lines = srPivotLines(sr).map((line) => `<p>${line}</p>`).join('');
+  return `<div class="sr-copy-tf">${srHeadHtml(tf, sr)}${lines}${renderSrCopyChannels(ch)}</div>`;
+}
+
+const expandedSrCopy = new Set();
+const SR_NOTE = '1 小时、4 小时各看最近一个已确认拐点，并叠拐点通道。爆量要量能振荡超过 20。通道试破只看收盘。只显示，不开单。';
+
 function renderSrPanel(data, coin) {
   const h1 = data && data['1h'] && data['1h'][coin];
   const h4 = data && data['4h'] && data['4h'][coin];
+  const open = expandedSrCopy.has(coin);
   return `<div class="sr-box" aria-label="1小时和4小时结构位">
-    <div class="sr-head"><span class="ema-chip-label">结构位</span><span class="sr-note">1 小时、4 小时各看最近一个已确认拐点，并叠拐点通道。爆量要量能振荡超过 20。通道试破只看收盘。只显示，不开单。</span></div>
+    <div class="sr-head"><span class="ema-chip-label">结构位</span><span class="sr-note">拐点 + 通道 · 爆量&gt;20 · 只显示</span></div>
     ${renderSrTf('1h', h1 && h1.sr, h1 && h1.srChannels)}
     ${renderSrTf('4h', h4 && h4.sr, h4 && h4.srChannels)}
+    <details class="sr-fold"${open ? ' open' : ''} data-sr-fold="${escAttr(coin)}">
+      <summary>原文</summary>
+      <div class="sr-fold-body">
+        <p class="sr-note">${SR_NOTE}</p>
+        ${renderSrCopyTf('1h', h1 && h1.sr, h1 && h1.srChannels)}
+        ${renderSrCopyTf('4h', h4 && h4.sr, h4 && h4.srChannels)}
+      </div>
+    </details>
   </div>`;
 }
 
