@@ -424,6 +424,14 @@ function intParam(v, fallback) {
   return Number.isFinite(n) ? Math.trunc(n) : fallback;
 }
 
+function clampInt(v, lo, hi, fallback) {
+  const n = intParam(v, fallback);
+  if (!Number.isFinite(n)) return fallback;
+  if (n < lo) return lo;
+  if (n > hi) return hi;
+  return n;
+}
+
 /**
  * 执行周期 MACD+KDJ + 4h/1d 背景：顺势入场 / 逆势试多 / 离场；1d 只作文案环境。
  */
@@ -2010,6 +2018,10 @@ export function attachAlphaTrend(ema, klines, opts = {}) {
   ema.combined = combineEmaAlpha(ema, at, ema.bb, ema.bollMid);
   ema.volume = evaluateVolumePulse(klines, { interval: opts.interval || '1h', volMaLen: 15 });
   ema.sr = evaluatePivotSr(klines, opts);
+  const tf = opts.interval || '1h';
+  if (tf === '1h' && ema.coin !== 'USDT.D') {
+    ema.srChannels = evaluateSrChannels(klines, { ...opts, interval: tf });
+  }
   // 迷你走势：最近收盘（用于卡片火花线，不删指标信息）
   const closes = (klines || []).map((k) => (Array.isArray(k) ? Number(k[4]) : Number(k.c ?? k.close)));
   ema.spark = closes.filter((v) => Number.isFinite(v)).slice(-48);
@@ -2299,6 +2311,402 @@ export function evaluatePivotSr(klines, opts = {}) {
   };
 }
 
+function channelRoleOf(high, low, close) {
+  if (high > close && low > close) return 'res';
+  if (high < close && low < close) return 'sup';
+  return 'inside';
+}
+
+function fmtChannelBand(n) {
+  if (!Number.isFinite(n)) return '--';
+  if (Math.abs(n) >= 1000) return Math.round(n).toLocaleString('en-US');
+  if (Math.abs(n) >= 1) return n.toFixed(2);
+  return n.toFixed(4);
+}
+
+function fmtChannelRange(low, high) {
+  if (!Number.isFinite(low) && !Number.isFinite(high)) return '--';
+  if (!Number.isFinite(low)) return fmtChannelBand(high);
+  if (!Number.isFinite(high)) return fmtChannelBand(low);
+  const span = Math.abs(high - low);
+  const ref = Math.max(Math.abs(high), Math.abs(low), 1);
+  if (span / ref < 1e-5) return fmtChannelBand(high);
+  return `${fmtChannelBand(low)}–${fmtChannelBand(high)}`;
+}
+
+/**
+ * LonesomeTheBlue 拐点通道。1h / 4h 用：把邻近已确认拐点收成带，
+ * 按触摸密度取最强的几条。只给结构和开仓资格软项，不改共振。
+ */
+export function evaluateSrChannels(klines, opts = {}) {
+  const prd = clampInt(opts.prd, 4, 30, 10);
+  const widthPct = clampInt(opts.ChannelW ?? opts.channelW, 1, 8, 5);
+  const minStrength = Math.max(1, intParam(opts.minstrength ?? opts.minStrength, 1));
+  const maxChannels = clampInt(opts.maxnumsr ?? opts.maxChannels, 1, 10, 6);
+  const loopback = clampInt(opts.loopback, 100, 400, 290);
+  const interval = opts.interval || '1h';
+  const bars = [];
+  for (const row of klines || []) {
+    const b = barOHLCV(row);
+    if (!b || ![b.h, b.l, b.c].every(Number.isFinite)) continue;
+    bars.push(b);
+  }
+  const n = bars.length;
+  if (n < prd * 2 + 5) return null;
+
+  const highs = bars.map((b) => b.h);
+  const lows = bars.map((b) => b.l);
+  const closes = bars.map((b) => b.c);
+
+  const pivotHighs = new Array(n).fill(null);
+  const pivotLows = new Array(n).fill(null);
+  for (let confirmation = prd * 2; confirmation < n; confirmation++) {
+    const p = confirmation - prd;
+    let leftHigh = -Infinity;
+    let leftLow = Infinity;
+    let rightHigh = -Infinity;
+    let rightLow = Infinity;
+    let ok = Number.isFinite(highs[p]) && Number.isFinite(lows[p]);
+    for (let k = p - prd; k < p && ok; k++) {
+      if (!Number.isFinite(highs[k]) || !Number.isFinite(lows[k])) { ok = false; break; }
+      if (highs[k] > leftHigh) leftHigh = highs[k];
+      if (lows[k] < leftLow) leftLow = lows[k];
+    }
+    for (let k = p + 1; k <= confirmation && ok; k++) {
+      if (!Number.isFinite(highs[k]) || !Number.isFinite(lows[k])) { ok = false; break; }
+      if (highs[k] > rightHigh) rightHigh = highs[k];
+      if (lows[k] < rightLow) rightLow = lows[k];
+    }
+    if (!ok) continue;
+    if (highs[p] >= leftHigh && highs[p] > rightHigh) pivotHighs[confirmation] = highs[p];
+    if (lows[p] <= leftLow && lows[p] < rightLow) pivotLows[confirmation] = lows[p];
+  }
+
+  const widthAt = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const from = Math.max(0, i - 299);
+    let mx = -Infinity;
+    let mn = Infinity;
+    for (let j = from; j <= i; j++) {
+      if (highs[j] > mx) mx = highs[j];
+      if (lows[j] < mn) mn = lows[j];
+    }
+    widthAt[i] = Number.isFinite(mx) && Number.isFinite(mn) ? (mx - mn) * widthPct / 100 : 0;
+  }
+
+  const pivotValues = [];
+  const pivotLocations = [];
+  let srLevels = Array.from({ length: 10 }, () => [0, 0]);
+  let lastResBreak = -1;
+  let lastSupBreak = -1;
+
+  for (let i = 0; i < n; i++) {
+    const ph = pivotHighs[i];
+    const pl = pivotLows[i];
+    const hasHigh = ph != null && ph !== 0;
+    const hasLow = pl != null && pl !== 0;
+    if (hasHigh || hasLow) {
+      pivotValues.unshift(hasHigh ? ph : pl);
+      pivotLocations.unshift(i);
+      while (pivotLocations.length && i - pivotLocations[pivotLocations.length - 1] > loopback) {
+        pivotLocations.pop();
+        pivotValues.pop();
+      }
+
+      const width = widthAt[i];
+      const candidates = [];
+      for (let s = 0; s < pivotValues.length; s++) {
+        let channelLow = pivotValues[s];
+        let channelHigh = pivotValues[s];
+        let strength = 0;
+        for (let t = 0; t < pivotValues.length; t++) {
+          const pv = pivotValues[t];
+          const proposed = pv <= channelHigh ? channelHigh - pv : pv - channelLow;
+          if (proposed <= width) {
+            if (pv <= channelHigh) channelLow = Math.min(channelLow, pv);
+            else channelHigh = Math.max(channelHigh, pv);
+            strength += 20;
+          }
+        }
+        candidates.push([strength, channelHigh, channelLow]);
+      }
+
+      const firstBar = Math.max(0, i - loopback);
+      for (const cand of candidates) {
+        const chHigh = cand[1];
+        const chLow = cand[2];
+        let touches = 0;
+        for (let j = firstBar; j <= i; j++) {
+          const hiIn = highs[j] <= chHigh && highs[j] >= chLow;
+          const loIn = lows[j] <= chHigh && lows[j] >= chLow;
+          if (hiIn || loIn) touches += 1;
+        }
+        cand[0] += touches;
+      }
+
+      srLevels = Array.from({ length: 10 }, () => [0, 0]);
+      const strengths = new Array(10).fill(0);
+      let selectedCount = 0;
+      for (let sel = 0; sel < candidates.length; sel++) {
+        let bestStrength = -1;
+        let bestIndex = -1;
+        const floor = minStrength * 20;
+        for (let ci = 0; ci < candidates.length; ci++) {
+          const strength = candidates[ci][0];
+          if (strength > bestStrength && strength >= floor) {
+            bestStrength = strength;
+            bestIndex = ci;
+          }
+        }
+        if (bestIndex < 0) break;
+        const chosen = candidates[bestIndex];
+        const selectedHigh = chosen[1];
+        const selectedLow = chosen[2];
+        srLevels[selectedCount] = [selectedHigh, selectedLow];
+        strengths[selectedCount] = chosen[0];
+        for (const cand of candidates) {
+          const upperInside = cand[1] <= selectedHigh && cand[1] >= selectedLow;
+          const lowerInside = cand[2] <= selectedHigh && cand[2] >= selectedLow;
+          if (upperInside || lowerInside) cand[0] = -1;
+        }
+        selectedCount += 1;
+        if (selectedCount >= 10) break;
+      }
+
+      for (let x = 0; x < 9; x++) {
+        for (let y = x + 1; y < 10; y++) {
+          if (strengths[y] > strengths[x]) {
+            const ts = strengths[x];
+            strengths[x] = strengths[y];
+            strengths[y] = ts;
+            const tl = srLevels[x];
+            srLevels[x] = srLevels[y];
+            srLevels[y] = tl;
+          }
+        }
+      }
+    }
+
+    const currentClose = closes[i];
+    let insideAny = false;
+    for (let c = 0; c < maxChannels; c++) {
+      const [chHigh, chLow] = srLevels[c];
+      if (chHigh === 0) continue;
+      if (currentClose <= chHigh && currentClose >= chLow) {
+        insideAny = true;
+        break;
+      }
+    }
+    if (i > 0 && !insideAny) {
+      const prevClose = closes[i - 1];
+      for (let c = 0; c < maxChannels; c++) {
+        const [chHigh, chLow] = srLevels[c];
+        if (chHigh === 0) continue;
+        if (prevClose <= chHigh && currentClose > chHigh) lastResBreak = i;
+        if (prevClose >= chLow && currentClose < chLow) lastSupBreak = i;
+      }
+    }
+  }
+
+  const live = n - 1;
+  const closed = n >= 2 ? n - 2 : live;
+  const close = closes[live];
+  const channels = [];
+  let insideChannel = null;
+  let nearestSup = null;
+  let nearestRes = null;
+  for (let c = 0; c < maxChannels; c++) {
+    const [high, low] = srLevels[c];
+    if (high === 0 || !Number.isFinite(high) || !Number.isFinite(low)) continue;
+    const role = channelRoleOf(high, low, close);
+    const item = { high, low, role };
+    channels.push(item);
+    if (role === 'inside' && !insideChannel) insideChannel = item;
+    if (role === 'sup') {
+      if (!nearestSup || high > nearestSup.high) nearestSup = item;
+    }
+    if (role === 'res') {
+      if (!nearestRes || low < nearestRes.low) nearestRes = item;
+    }
+  }
+  if (nearestSup) {
+    nearestSup = {
+      ...nearestSup,
+      dist: nearestSup.high ? (close / nearestSup.high - 1) * 100 : null,
+    };
+  }
+  if (nearestRes) {
+    nearestRes = {
+      ...nearestRes,
+      dist: nearestRes.low ? (close / nearestRes.low - 1) * 100 : null,
+    };
+  }
+  const resBrokenAgo = lastResBreak >= 0 && lastResBreak <= closed ? closed - lastResBreak : null;
+  const supBrokenAgo = lastSupBreak >= 0 && lastSupBreak <= closed ? closed - lastSupBreak : null;
+
+  return {
+    ready: true,
+    interval,
+    close,
+    channels,
+    inside: !!insideChannel,
+    insideChannel,
+    nearestSup,
+    nearestRes,
+    resBroken: lastResBreak === closed,
+    supBroken: lastSupBreak === closed,
+    resBrokenAgo,
+    supBrokenAgo,
+  };
+}
+
+function classifySrChannelCheck(ch, side) {
+  if (!ch || !ch.ready) {
+    return { pass: null, detail: '未就绪', hard: false };
+  }
+  const tf = ch.interval || '1h';
+  if (!ch.channels || !ch.channels.length) {
+    return { pass: null, detail: `${tf} 还没有通道`, hard: false };
+  }
+  const fmt = (band) => fmtChannelRange(band.low, band.high);
+  const justRes = ch.resBroken || (ch.resBrokenAgo != null && ch.resBrokenAgo <= 2);
+  const justSup = ch.supBroken || (ch.supBrokenAgo != null && ch.supBrokenAgo <= 2);
+
+  if (ch.inside && ch.insideChannel) {
+    const ic = ch.insideChannel;
+    const width = ic.high - ic.low;
+    const pos = width > 0 ? (ch.close - ic.low) / width : 0.5;
+    const place = pos <= 0.45 ? '近下沿' : pos >= 0.55 ? '近上沿' : '通道中部';
+    const detail = `${tf} 价在通道内 ${fmt(ic)} · ${place}`;
+    if (side === 'long') {
+      if (pos <= 0.45) return { pass: true, detail: `${detail} · 踩着支撑带`, hard: false };
+      if (pos >= 0.55) return { pass: false, detail: `${detail} · 卡在阻力带`, hard: false };
+      return { pass: null, detail: `${detail} · 等回踩通道`, hard: false };
+    }
+    if (pos >= 0.55) return { pass: true, detail: `${detail} · 顶着阻力带`, hard: false };
+    if (pos <= 0.45) return { pass: false, detail: `${detail} · 卡在支撑带`, hard: false };
+    return { pass: null, detail: `${detail} · 等回踩通道`, hard: false };
+  }
+
+  if (justRes) {
+    const d = `${tf} 刚试破阻力`;
+    if (side === 'long') return { pass: true, detail: d, hard: false };
+    return { pass: false, detail: d, hard: false };
+  }
+  if (justSup) {
+    const d = `${tf} 刚试破支撑`;
+    if (side === 'short') return { pass: true, detail: d, hard: false };
+    return { pass: false, detail: d, hard: false };
+  }
+
+  const bits = [];
+  if (ch.nearestSup) bits.push(`支撑带 ${fmt(ch.nearestSup)}`);
+  if (ch.nearestRes) bits.push(`阻力带 ${fmt(ch.nearestRes)}`);
+  const mid = bits.length ? bits.join(' · ') : '两带之间';
+  return { pass: null, detail: `${tf} ${mid} · 等回踩通道`, hard: false };
+}
+
+/**
+ * UT Bot：Wilder ATR(10)×1.0 递归跟踪止损。
+ * 1m 上穿/下穿可作触发补充；止损价给预测文案。不进共振，不替换 AlphaTrend。
+ */
+export function evaluateUtBot(klines, opts = {}) {
+  const a = Number.isFinite(Number(opts.a)) ? Number(opts.a) : 1.0;
+  const period = Math.max(1, intParam(opts.c, 10));
+  const interval = opts.interval || '1m';
+  const bars = [];
+  for (const row of klines || []) {
+    const b = barOHLCV(row);
+    if (!b || ![b.h, b.l, b.c].every(Number.isFinite)) continue;
+    bars.push(b);
+  }
+  const n = bars.length;
+  if (n < period + 3) return null;
+
+  const tr = new Array(n);
+  const src = new Array(n);
+  for (let i = 0; i < n; i++) {
+    src[i] = bars[i].c;
+    if (i === 0) {
+      tr[i] = bars[i].h - bars[i].l;
+    } else {
+      tr[i] = Math.max(
+        bars[i].h - bars[i].l,
+        Math.abs(bars[i].h - bars[i - 1].c),
+        Math.abs(bars[i].l - bars[i - 1].c),
+      );
+    }
+  }
+  const atr = calcRMA(tr, period);
+  if (!atr) return null;
+
+  const stop = new Array(n).fill(null);
+  let prevStop = null;
+  let prevSrc = null;
+  for (let i = 0; i < n; i++) {
+    const loss = atr[i] == null ? null : a * atr[i];
+    const cur = src[i];
+    const ref = prevStop == null ? 0 : prevStop;
+    let curStop = null;
+    if (loss != null && Number.isFinite(cur) && Number.isFinite(loss)) {
+      if (cur > ref && prevSrc != null && prevSrc > ref) {
+        curStop = Math.max(ref, cur - loss);
+      } else if (cur < ref && prevSrc != null && prevSrc < ref) {
+        curStop = Math.min(ref, cur + loss);
+      } else if (cur > ref) {
+        curStop = cur - loss;
+      } else {
+        curStop = cur + loss;
+      }
+    }
+    stop[i] = curStop;
+    prevStop = curStop;
+    prevSrc = cur;
+  }
+
+  const i = n - 1;
+  const prev = i - 1;
+  const s = stop[i];
+  const px = src[i];
+  if (s == null || !Number.isFinite(px)) return null;
+  const buyEvent = prev >= 0 && stop[prev] != null && px > s && src[prev] <= stop[prev];
+  const sellEvent = prev >= 0 && stop[prev] != null && s > px && stop[prev] <= src[prev];
+
+  let lastBuy = null;
+  let lastSell = null;
+  for (let j = i; j >= 1; j--) {
+    if (stop[j] == null || stop[j - 1] == null) continue;
+    const buy = src[j] > stop[j] && src[j - 1] <= stop[j - 1];
+    const sell = stop[j] > src[j] && stop[j - 1] <= src[j - 1];
+    if (lastBuy == null && buy) lastBuy = i - j;
+    if (lastSell == null && sell) lastSell = i - j;
+    if (lastBuy != null && lastSell != null) break;
+  }
+
+  const dir = px > s ? 'long' : px < s ? 'short' : 'watch';
+  const lastFlip = lastBuy != null && (lastSell == null || lastBuy < lastSell)
+    ? 'buy'
+    : lastSell != null ? 'sell' : null;
+  const lastFlipAgo = lastFlip === 'buy' ? lastBuy : lastFlip === 'sell' ? lastSell : null;
+
+  return {
+    ready: true,
+    interval,
+    a,
+    period,
+    stop: s,
+    stopText: fmtUsd(s, px),
+    src: px,
+    dir,
+    buyEvent,
+    sellEvent,
+    lastBuyAgo: lastBuy,
+    lastSellAgo: lastSell,
+    lastFlip,
+    lastFlipAgo,
+  };
+}
+
 export function formatMacdHist(h) {
   if (!Number.isFinite(h)) return '--';
   const a = Math.abs(h);
@@ -2408,6 +2816,9 @@ export function evaluateHtfContext(klines, coin = '', opts = {}) {
   mk.adx = adx;
   mk.volume = vol;
   mk.sr = sr;
+  if (interval === '4h') {
+    mk.srChannels = evaluateSrChannels(klines, { ...opts, interval });
+  }
   mk.weeklyMacd = weeklyMacd;
   return mk;
 }
@@ -2428,7 +2839,7 @@ function goldCrossFromKlines(klines, interval) {
   return { closes, ema7, ema21, ema56, last21, closeCross56, index: i };
 }
 
-function buildLtfPulse(interval, ema, bb, gold, closeCross56, distPct) {
+function buildLtfPulse(interval, ema, bb, gold, closeCross56, distPct, ut) {
   const is1m = interval === '1m';
   const goldLook = is1m ? 45 : 18;
   const goldUp = !!(gold && gold.dir === 'up' && gold.barsAgo != null && gold.barsAgo <= goldLook);
@@ -2508,6 +2919,24 @@ function buildLtfPulse(interval, ema, bb, gold, closeCross56, distPct) {
     reasons.push(`7/21 死叉（${gold.timeAgoText}）`);
   }
 
+  if (ut) {
+    if (ut.buyEvent && dir === 'long' && (kind === 'trigger' || kind === 'rebound')) {
+      reasons.push('UT 同步上穿止损');
+    } else if (ut.sellEvent && dir === 'short' && (kind === 'trigger' || kind === 'dump')) {
+      reasons.push('UT 同步下穿止损');
+    } else if (is1m && (kind === 'bias' || kind === 'idle') && ut.buyEvent) {
+      dir = 'long';
+      kind = 'trigger';
+      label = '触发多·UT上穿止损';
+      reasons.unshift('收盘价上穿 ATR 跟踪止损，短线触发多');
+    } else if (is1m && (kind === 'bias' || kind === 'idle') && ut.sellEvent) {
+      dir = 'short';
+      kind = 'trigger';
+      label = '触发空·UT下穿止损';
+      reasons.unshift('收盘价下穿 ATR 跟踪止损，短线触发空/多单止盈时点');
+    }
+  }
+
   if (expandEnd) reasons.push('布林阔口结束，波动从极端回到收敛，不宜追突破');
   if (squeezeEnd) reasons.push('布林收口结束、开始开口，等方向确认');
   if (is1m && (kind === 'trigger' || kind === 'rebound')) {
@@ -2558,11 +2987,13 @@ export function evaluateLtfPulse(klines, coin = '', opts = {}) {
     };
   }
   const distPct = distPctToEma56(ema.price, ema.ema56);
-  const pulse = buildLtfPulse(interval, ema, bb, gold, g.closeCross56, distPct);
+  const ut = evaluateUtBot(klines, { interval });
+  const pulse = buildLtfPulse(interval, ema, bb, gold, g.closeCross56, distPct, ut);
   ema.bb = bb;
   ema.adx = adx;
   ema.macdKdj = mk;
   ema.goldCross = gold;
+  ema.ut = ut;
   ema.pulse = pulse;
   ema.combined = { dir: pulse.dir, label: pulse.label, reason: pulse.reason };
   const closes = g.closes.filter((v) => Number.isFinite(v));
@@ -2815,6 +3246,10 @@ export function evaluateTfForecast(input) {
   const h1Pass = !r1h ? null : d1h === side ? true : d1h === 'watch' ? false : (reboundLong || dumpShort);
   push('1h', '1h 结构同向', h1Pass, d1h === 'watch' ? `${h1Label}` : `${side === d1h ? '同向' : '反向'} · ${h1Label}`);
 
+  const chSrc = (r1h && r1h.srChannels) || (h4 && h4.srChannels) || null;
+  const chQ = classifySrChannelCheck(chSrc, side);
+  push('srch', '结构通道', chQ.pass, chQ.detail, false);
+
   const m15Label = r15 && r15.combined ? r15.combined.label : '未就绪';
   let m15Pass = !r15 ? null : d15 === side;
   if (r15 && d15 === 'watch' && r15.bb) {
@@ -2926,6 +3361,19 @@ export function evaluateTfForecast(input) {
     predReason = `背景${stD === 'long-only' || stW === 'long-only' ? '只做多' : '只做空'}，反向单不做。`;
   }
 
+  const trying = /试多|试空/.test(predLabel);
+  if (trying && chQ) {
+    if (chQ.pass === false) {
+      predReason += side === 'long' ? ' 现价卡在阻力带，仓位宜轻。' : ' 现价卡在支撑带，仓位宜轻。';
+    } else if (chQ.pass === null && /等回踩通道/.test(chQ.detail || '')) {
+      predReason += ' 现价在通道之间，等回踩通道。';
+    }
+  }
+  const ut1 = r1m && r1m.ut;
+  if (trying && ut1 && ut1.stopText) {
+    predReason += ` 1m UT止损 ${ut1.stopText}。`;
+  }
+
   const distSrc = r15 || r1h || r1m;
   const distPct = distSrc && Number.isFinite(distSrc.price) && Number.isFinite(distSrc.ema56)
     ? (distSrc.price / distSrc.ema56 - 1) * 100
@@ -2942,6 +3390,7 @@ export function evaluateTfForecast(input) {
       ? `量 ${volSrc.label}${Number.isFinite(volSrc.ratio) ? ' ' + volSrc.ratio.toFixed(2) + 'x' : ''}`
       : null,
     wMacd && Number.isFinite(wMacd.closedHist) ? `周柱 ${histText(wMacd.closedHist)}` : null,
+    ut1 && ut1.stopText ? `UT止损 ${ut1.stopText}` : null,
   ].filter(Boolean);
 
   const mark = (d, stance) => {

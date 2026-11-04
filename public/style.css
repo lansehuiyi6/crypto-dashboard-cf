@@ -1207,6 +1207,13 @@ body {
   color: var(--text-secondary);
 }
 
+.sr-ch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
 .macd-bars {
   display: inline-flex;
   align-items: center;

@@ -335,7 +335,7 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
         try {
           let klines;
           try {
-            klines = await fetchKlines(symbol, interval, KLINE_LIMIT);
+            klines = await fetchKlines(symbol, interval, (interval === '1h' || interval === '4h') ? 320 : KLINE_LIMIT);
           } catch {
             if (isHtf) throw new Error('htf needs binance klines');
             klines = await fetchCgKlines(coin, interval);

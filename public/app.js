@@ -22,6 +22,7 @@ import { SCALP_SYMBOLS, evaluateScalp } from './scalp-core.js';
 import { loadPb80, pb80StripHtml, setPb80Repaint } from './pb80-live.js';
 
 const KLINE_LIMIT = 160;
+const CHANNEL_KLINE_LIMIT = 320;
 
 
 const COINGECKO_IDS = {
@@ -328,7 +329,7 @@ async function fetchSymbolIntoBoard(board, coin, symbol, force = false) {
   }
   const execJobs = EXEC_INTERVALS.map(async (interval) => {
     try {
-      const klines = await getKlinesCached(symbol, interval, force);
+      const klines = await getKlinesCached(symbol, interval, force, execKlineLimit(interval));
       const row = rowFromKlines(klines, coin, interval);
       board[interval][coin] = row;
       if (!row) board.errors.push(coin + ' ' + interval + ': 指标不足');
@@ -879,9 +880,15 @@ function klineFreshMs(interval) {
   return 4 * 60 * 1000;
 }
 
+function execKlineLimit(interval) {
+  if (interval === '1h') return CHANNEL_KLINE_LIMIT;
+  return KLINE_LIMIT;
+}
+
 function htfKlineLimit(interval) {
   if (interval === '1w') return 100;
   if (interval === '1d') return 120;
+  if (interval === '4h') return CHANNEL_KLINE_LIMIT;
   return 140;
 }
 
@@ -1752,8 +1759,26 @@ function renderLtfCol(tf, row) {
       ${row.bb ? emaMetric('轨道', bbRailsHtml(row.bb)) : ''}
       ${mk ? emaMetric('MK', mkLine) : ''}
       ${row.volume ? emaMetric('量', volHtml(row.volume)) : ''}
+      ${tf === '1m' && row.ut ? emaMetric('UT', utHtml(row.ut)) : ''}
     </div>
   </div>`;
+}
+
+function utHtml(ut) {
+  if (!ut || !ut.ready) return '<span class="strategy-tag watch">--</span>';
+  const cls = ut.buyEvent || (ut.dir === 'long' && !ut.sellEvent)
+    ? 'long'
+    : ut.sellEvent || ut.dir === 'short' ? 'short' : 'watch';
+  let tag = 'UT平';
+  if (ut.buyEvent) tag = 'UT上穿';
+  else if (ut.sellEvent) tag = 'UT下穿';
+  else if (ut.dir === 'long') tag = 'UT多';
+  else if (ut.dir === 'short') tag = 'UT空';
+  const stop = ut.stopText || srPx(ut.stop);
+  const ago = Number.isFinite(ut.lastFlipAgo) && !ut.buyEvent && !ut.sellEvent
+    ? `上次${ut.lastFlip === 'buy' ? '上穿' : '下穿'} ${ut.lastFlipAgo} 根前`
+    : '';
+  return `<span class="strategy-tag ${cls}" title="${escAttr(ago)}">${tag}</span><span class="ema-meta">止损 ${stop}</span>`;
 }
 
 function renderEmaTfCol(tf, row) {
@@ -1839,15 +1864,25 @@ function srPx(n) {
   return fmtBand(n);
 }
 
+function srBandText(low, high) {
+  if (!Number.isFinite(low) && !Number.isFinite(high)) return '--';
+  if (!Number.isFinite(low)) return srPx(high);
+  if (!Number.isFinite(high)) return srPx(low);
+  const span = Math.abs(high - low);
+  const ref = Math.max(Math.abs(high), Math.abs(low), 1);
+  if (span / ref < 1e-5) return srPx(high);
+  return `${srPx(low)}–${srPx(high)}`;
+}
+
 function srPlace(n) {
   if (!Number.isFinite(n)) return '';
   const abs = Math.abs(n).toFixed(2) + '%';
   return n >= 0 ? `上方 ${abs}` : `下方 ${abs}`;
 }
 
-function renderSrTf(tf, sr) {
+function renderSrTf(tf, sr, ch) {
   if (!sr) {
-    return `<div class="sr-tf"><div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="ema-muted">K 线还不够确认拐点</span></div></div>`;
+    return `<div class="sr-tf"><div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="ema-muted">K 线还不够确认拐点</span></div>${renderSrChannels(ch)}</div>`;
   }
   const supCls = (sr.supportState === 'broke' || sr.supportState === 'broke-burst' || sr.supportState === 'failed')
     ? 'short'
@@ -1875,16 +1910,49 @@ function renderSrTf(tf, sr) {
     <div class="sr-tf-h"><span class="ema-tf">${tf}</span><span class="strategy-tag ${supCls}">${sr.supportLabel}</span><span class="strategy-tag ${resCls}">${sr.resistanceLabel}</span>${burst}${cross}</div>
     <p>${supLine}</p>
     <p>${resLine}</p>
+    ${renderSrChannels(ch)}
   </div>`;
+}
+
+function renderSrChannels(ch) {
+  if (!ch) return '';
+  if (!ch.ready || !ch.channels || !ch.channels.length) {
+    return '<p class="sr-ch">拐点还没聚成通道。</p>';
+  }
+  const bits = [];
+  if (ch.inside && ch.insideChannel) {
+    const ic = ch.insideChannel;
+    const width = ic.high - ic.low;
+    const pos = width > 0 ? (ch.close - ic.low) / width : 0.5;
+    const place = pos <= 0.45 ? '近下沿' : pos >= 0.55 ? '近上沿' : '通道中部';
+    bits.push(`<p class="sr-ch"><span class="strategy-tag watch">价在通道内</span> ${srBandText(ic.low, ic.high)} · ${place}</p>`);
+  }
+  if (ch.nearestSup) {
+    bits.push(`<p class="sr-ch"><span class="strategy-tag long">支撑带</span> ${srBandText(ch.nearestSup.low, ch.nearestSup.high)} · 现价在${srPlace(ch.nearestSup.dist)}</p>`);
+  }
+  if (ch.nearestRes) {
+    bits.push(`<p class="sr-ch"><span class="strategy-tag short">阻力带</span> ${srBandText(ch.nearestRes.low, ch.nearestRes.high)} · 现价在${srPlace(ch.nearestRes.dist)}</p>`);
+  }
+  const recentRes = ch.resBroken || (ch.resBrokenAgo != null && ch.resBrokenAgo <= 2);
+  const recentSup = ch.supBroken || (ch.supBrokenAgo != null && ch.supBrokenAgo <= 2);
+  if (recentRes) {
+    const when = ch.resBroken ? '上一根收盘穿出上沿' : `${ch.resBrokenAgo} 根前收盘穿出上沿`;
+    bits.push(`<p class="sr-ch"><span class="strategy-tag long">通道试破阻力</span> ${when}，无量确认。</p>`);
+  }
+  if (recentSup) {
+    const when = ch.supBroken ? '上一根收盘穿出下沿' : `${ch.supBrokenAgo} 根前收盘穿出下沿`;
+    bits.push(`<p class="sr-ch"><span class="strategy-tag short">通道试破支撑</span> ${when}，无量确认。</p>`);
+  }
+  return bits.join('');
 }
 
 function renderSrPanel(data, coin) {
   const h1 = data && data['1h'] && data['1h'][coin];
   const h4 = data && data['4h'] && data['4h'][coin];
   return `<div class="sr-box" aria-label="1小时和4小时结构位">
-    <div class="sr-head"><span class="ema-chip-label">结构位</span><span class="sr-note">1 小时、4 小时各看最近一个已确认拐点。爆量要量能振荡超过 20。只显示，不开单。</span></div>
-    ${renderSrTf('1h', h1 && h1.sr)}
-    ${renderSrTf('4h', h4 && h4.sr)}
+    <div class="sr-head"><span class="ema-chip-label">结构位</span><span class="sr-note">1 小时、4 小时各看最近一个已确认拐点，并叠拐点通道。爆量要量能振荡超过 20。通道试破只看收盘。只显示，不开单。</span></div>
+    ${renderSrTf('1h', h1 && h1.sr, h1 && h1.srChannels)}
+    ${renderSrTf('4h', h4 && h4.sr, h4 && h4.srChannels)}
   </div>`;
 }
 
@@ -2153,7 +2221,7 @@ async function loadEmaStrategy(force = false) {
     const execJobs = EXEC_INTERVALS.flatMap((interval) =>
       Object.entries(symbols).map(async ([coin, symbol]) => {
         try {
-          const klines = await getKlinesCached(symbol, interval, force);
+          const klines = await getKlinesCached(symbol, interval, force, execKlineLimit(interval));
           const row = rowFromKlines(klines, coin, interval);
           board[interval][coin] = row;
           if (!row) board.errors.push(coin + ' ' + interval + ': 指标不足');
@@ -3115,7 +3183,7 @@ async function loadSignalStrategyCompact(sig) {
 
   let r1h = fromBoard && fromBoard.r1h;
   if (!r1h) {
-    const k1h = await getKlinesCached(symbol, '1h', false);
+    const k1h = await getKlinesCached(symbol, '1h', false, execKlineLimit('1h'));
     r1h = rowFromKlines(k1h, coin, '1h');
   }
   if (!r15 && !r1h) throw new Error('指标不足');
@@ -3130,7 +3198,7 @@ async function loadSignalStrategyDetails(entry) {
     const coin = entry.coin;
     if (!symbol) throw new Error('no symbol');
     try {
-      const k4h = await getKlinesCached(symbol, '4h', false, 140);
+      const k4h = await getKlinesCached(symbol, '4h', false, htfKlineLimit('4h'));
       entry.r4h = htfFromKlines(k4h, coin, '4h');
       const adx = (entry.r4h && entry.r4h.adx) || evaluateAdx(k4h, { interval: '4h' });
       if (adx) entry.adx4h = adx;
