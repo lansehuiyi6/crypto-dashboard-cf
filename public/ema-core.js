@@ -3426,3 +3426,341 @@ export function evaluateTfForecast(input) {
   };
 }
 
+/** 把 btc / btcusdt / BTC-USDT 收成 { coin, symbol }，规则与看板临时币对相同。 */
+export function parseTradeSymbol(raw) {
+  let s = String(raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!s) return null;
+  if (s.endsWith('USD') && !s.endsWith('USDT')) s += 'T';
+  if (!s.endsWith('USDT')) s += 'USDT';
+  const coin = s.slice(0, -4);
+  if (!coin || coin.length < 2 || coin.length > 15) return null;
+  if (!/^[A-Z0-9]+$/.test(coin)) return null;
+  return { coin, symbol: s };
+}
+
+function fmtAdvicePx(n, ref) {
+  if (!Number.isFinite(n)) return '--';
+  const p = Number.isFinite(ref) ? Math.abs(ref) : Math.abs(n);
+  if (p >= 1000) return Math.round(n).toLocaleString('en-US');
+  if (p >= 100) return n.toFixed(2);
+  if (p >= 1) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+function round4(n) {
+  return Math.round(n * 10000) / 10000;
+}
+
+function pickAdvicePrice(r1m, r5m, r15, r1h, h4) {
+  const rows = [r1m, r5m, r15, r1h, h4];
+  for (const row of rows) {
+    const p = row && Number.isFinite(row.price) ? row.price
+      : (row && row.htf && Number.isFinite(row.htf.price) ? row.htf.price : null);
+    if (Number.isFinite(p) && p > 0) return p;
+  }
+  return null;
+}
+
+function mapAdviceAction(pred) {
+  const label = (pred && pred.label) || '观望';
+  if (/试多/.test(label)) {
+    return { action: 'long', actionLabel: '做多', light: /轻仓/.test(label) };
+  }
+  if (/试空/.test(label)) {
+    return { action: 'short', actionLabel: '做空', light: /轻仓/.test(label) };
+  }
+  return { action: 'wait', actionLabel: '等待', light: false, waitLabel: label };
+}
+
+function pushAdviceLevel(list, price, source, tf, rank, use) {
+  if (!Number.isFinite(price) || price <= 0) return;
+  list.push({ price, source, tf, rank: rank || 0, use: use || 'both' });
+}
+
+function levelFitsSide(lv, side, asStop) {
+  const use = lv.use || 'both';
+  if (use === 'both') return true;
+  if (asStop) return side === 'long' ? use === 'sup' : use === 'res';
+  return side === 'long' ? use === 'res' : use === 'sup';
+}
+
+function collectAdviceLevels(rows, price) {
+  const stops = [];
+  const targets = [];
+  const r1m = rows.r1m;
+  const r15 = rows.r15;
+  const r1h = rows.r1h;
+  const h4 = rows.h4;
+
+  const ut = r1m && r1m.ut;
+  if (ut && Number.isFinite(ut.stop)) {
+    pushAdviceLevel(stops, ut.stop, '1m UT跟踪止损', '1m', 100, 'both');
+  }
+
+  const takeSr = (sr, tf, rank) => {
+    if (!sr) return;
+    pushAdviceLevel(stops, sr.support, `${tf} 支撑`, tf, rank, 'sup');
+    pushAdviceLevel(targets, sr.support, `${tf} 支撑`, tf, rank, 'sup');
+    pushAdviceLevel(stops, sr.resistance, `${tf} 阻力`, tf, rank, 'res');
+    pushAdviceLevel(targets, sr.resistance, `${tf} 阻力`, tf, rank, 'res');
+  };
+  takeSr(r15 && r15.sr, '15m', 92);
+  takeSr(r1h && r1h.sr, '1h', 66);
+  takeSr(h4 && h4.sr, '4h', 42);
+
+  const takeCh = (ch, tf, rank) => {
+    if (!ch || !ch.ready) return;
+    if (ch.insideChannel) {
+      pushAdviceLevel(stops, ch.insideChannel.low, `${tf} 通道下沿`, tf, rank, 'sup');
+      pushAdviceLevel(targets, ch.insideChannel.low, `${tf} 通道下沿`, tf, rank, 'sup');
+      pushAdviceLevel(stops, ch.insideChannel.high, `${tf} 通道上沿`, tf, rank, 'res');
+      pushAdviceLevel(targets, ch.insideChannel.high, `${tf} 通道上沿`, tf, rank, 'res');
+    }
+    if (ch.nearestSup) {
+      pushAdviceLevel(stops, ch.nearestSup.low, `${tf} 支撑带下沿`, tf, rank, 'sup');
+      pushAdviceLevel(targets, ch.nearestSup.high, `${tf} 支撑带上沿`, tf, rank - 2, 'sup');
+    }
+    if (ch.nearestRes) {
+      pushAdviceLevel(targets, ch.nearestRes.low, `${tf} 阻力带下沿`, tf, rank, 'res');
+      pushAdviceLevel(stops, ch.nearestRes.high, `${tf} 阻力带上沿`, tf, rank - 2, 'res');
+    }
+  };
+  takeCh(r1h && r1h.srChannels, '1h', 64);
+  takeCh(h4 && h4.srChannels, '4h', 40);
+
+  const takeBb = (bb, tf, midRank, railRank) => {
+    if (!bb) return;
+    pushAdviceLevel(targets, bb.mid, `${tf} 布林中轨`, tf, midRank, 'both');
+    pushAdviceLevel(stops, bb.mid, `${tf} 布林中轨`, tf, midRank - 8, 'both');
+    pushAdviceLevel(targets, bb.upper, `${tf} 布林上轨`, tf, railRank, 'res');
+    pushAdviceLevel(stops, bb.upper, `${tf} 布林上轨`, tf, railRank, 'res');
+    pushAdviceLevel(targets, bb.lower, `${tf} 布林下轨`, tf, railRank, 'sup');
+    pushAdviceLevel(stops, bb.lower, `${tf} 布林下轨`, tf, railRank, 'sup');
+  };
+  takeBb(r15 && r15.bb, '15m', 88, 82);
+  takeBb(r1h && r1h.bb, '1h', 58, 54);
+
+  const takeKc = (kc, tf) => {
+    if (!kc || !kc.ready) return;
+    pushAdviceLevel(targets, kc.midline, `${tf} KC中轨`, tf, tf === '15m' ? 78 : 56, 'both');
+    pushAdviceLevel(stops, kc.outerLower, `${tf} KC外下轨`, tf, tf === '15m' ? 74 : 52, 'sup');
+    pushAdviceLevel(stops, kc.outerUpper, `${tf} KC外上轨`, tf, tf === '15m' ? 74 : 52, 'res');
+  };
+  takeKc(r15 && r15.keltner, '15m');
+  takeKc(r1h && r1h.keltner, '1h');
+
+  if (Number.isFinite(price)) {
+    const midStopLong = price * (1 - 1.5 / 100);
+    const midStopShort = price * (1 + 1.5 / 100);
+    pushAdviceLevel(stops, midStopLong, '15m 中轴1.5%', '15m', 70);
+    pushAdviceLevel(stops, midStopShort, '15m 中轴1.5%', '15m', 70);
+    pushAdviceLevel(stops, price * (1 - STOP_PCT / 100), `EMA止损 ${STOP_PCT}%`, '1m', 28);
+    pushAdviceLevel(stops, price * (1 + STOP_PCT / 100), `EMA止损 ${STOP_PCT}%`, '1m', 28);
+    pushAdviceLevel(targets, price * (1 + TAKE_PCT / 100), `EMA止盈 ${TAKE_PCT}%`, '1m', 22);
+    pushAdviceLevel(targets, price * (1 - TAKE_PCT / 100), `EMA止盈 ${TAKE_PCT}%`, '1m', 22);
+  }
+
+  return { stops, targets };
+}
+
+function dedupeAdviceLevels(list, price) {
+  const sorted = list.slice().sort((a, b) => {
+    if (b.rank !== a.rank) return b.rank - a.rank;
+    return Math.abs(a.price - price) - Math.abs(b.price - price);
+  });
+  const out = [];
+  for (const item of sorted) {
+    const near = out.find((x) => Math.abs(x.price / item.price - 1) < 0.0006);
+    if (near) continue;
+    out.push(item);
+  }
+  return out;
+}
+
+function packAdviceLevel(item, ref, extra = {}) {
+  const pct = ((item.price / ref) - 1) * 100;
+  return {
+    price: item.price,
+    text: fmtAdvicePx(item.price, ref),
+    source: item.source,
+    tf: item.tf,
+    pct: round4(pct),
+    pctText: fmtPctSigned(pct),
+    ...extra,
+  };
+}
+
+function nearer(a, b, price) {
+  return Math.abs(a.price - price) - Math.abs(b.price - price);
+}
+
+function pickStopForSide(levels, price, side) {
+  const minPct = 0.08;
+  const maxPct = 2.5;
+  const wantBelow = side === 'long';
+  const pool = levels.filter((lv) => {
+    if (!levelFitsSide(lv, side, true)) return false;
+    if (wantBelow ? !(lv.price < price) : !(lv.price > price)) return false;
+    const d = Math.abs(lv.price / price - 1) * 100;
+    return d >= minPct;
+  });
+  const scalp = pool.filter((lv) => Math.abs(lv.price / price - 1) * 100 <= maxPct);
+  const use = scalp.length ? scalp : pool;
+  if (!use.length) return null;
+  const ut = use.find((lv) => lv.tf === '1m' && /UT/.test(lv.source));
+  if (ut) return ut;
+  const tf15 = use.filter((lv) => lv.tf === '15m').sort((a, b) => nearer(a, b, price));
+  if (tf15[0]) return tf15[0];
+  const tf1h = use.filter((lv) => lv.tf === '1h').sort((a, b) => nearer(a, b, price));
+  if (tf1h[0]) return tf1h[0];
+  return use.slice().sort((a, b) => {
+    if (b.rank !== a.rank) return b.rank - a.rank;
+    return nearer(a, b, price);
+  })[0];
+}
+
+function pickTargetsForSide(levels, price, side) {
+  const minPct = 0.08;
+  const maxPct = 3.0;
+  const wantAbove = side === 'long';
+  const pool = levels.filter((lv) => {
+    if (!levelFitsSide(lv, side, false)) return false;
+    if (wantAbove ? !(lv.price > price) : !(lv.price < price)) return false;
+    const d = Math.abs(lv.price / price - 1) * 100;
+    return d >= minPct;
+  }).sort((a, b) => nearer(a, b, price));
+  const scalp = pool.filter((lv) => Math.abs(lv.price / price - 1) * 100 <= maxPct);
+  const near15 = scalp.filter((lv) => lv.tf === '15m');
+  const near1h = scalp.filter((lv) => lv.tf === '1h');
+  const primary = near15[0] || near1h[0] || scalp[0] || pool[0] || null;
+  const rest = pool.filter((lv) => {
+    if (!primary) return true;
+    if (Math.abs(lv.price / primary.price - 1) < 0.0006) return false;
+    if (side === 'long') return lv.price > primary.price;
+    return lv.price < primary.price;
+  });
+  const nextNear = rest.filter((lv) => lv.tf === '15m' || lv.tf === '1h');
+  const next = nextNear[0] || rest[0] || null;
+  const stretch = rest.find((lv) => lv !== next && (lv.tf === '4h' || /EMA止盈/.test(lv.source))) || rest[1] || null;
+  return { primary, next, stretch };
+}
+
+/**
+ * 超短线建议：方向跟开仓资格，止盈止损跟 1m UT + 15m/1h 结构。
+ * 不改 combineEmaAlpha / 共振。
+ */
+export function buildTradeAdvice(input) {
+  const { coin, symbol, r1m, r5m, r15, r1h, h4, d1, w1, missing } = input || {};
+  const forecast = evaluateTfForecast({ r1m, r5m, r15, r1h, h4, d1, w1 });
+  const price = pickAdvicePrice(r1m, r5m, r15, r1h, h4);
+  if (!forecast || !Number.isFinite(price)) {
+    return {
+      ok: false,
+      coin: coin || '',
+      symbol: symbol || '',
+      error: 'K 线不足，无法按开仓资格分析',
+      missing: missing || [],
+    };
+  }
+
+  const mapped = mapAdviceAction(forecast.pred);
+  const planSide = mapped.action === 'wait'
+    ? (forecast.side === 'long' || forecast.side === 'short' ? forecast.side : null)
+    : mapped.action;
+  const chCheck = (forecast.checks || []).find((c) => c.id === 'srch');
+  const light = mapped.light || (mapped.action !== 'wait' && chCheck && chCheck.pass === false);
+  const size = mapped.action === 'wait' ? 'none' : (light ? 'light' : 'normal');
+  const sizeLabel = mapped.action === 'wait' ? '不开仓' : (light ? '轻仓' : '标准');
+
+  const raw = collectAdviceLevels({ r1m, r15, r1h, h4 }, price);
+  const stopLevels = dedupeAdviceLevels(raw.stops, price);
+  const targetLevels = dedupeAdviceLevels(raw.targets, price);
+
+  let stop = null;
+  let targetPick = { primary: null, next: null, stretch: null };
+  if (planSide === 'long' || planSide === 'short') {
+    stop = pickStopForSide(stopLevels, price, planSide);
+    targetPick = pickTargetsForSide(targetLevels, price, planSide);
+  }
+
+  const packedStop = stop ? packAdviceLevel(stop, price, { role: 'primary' }) : null;
+  const packedTargets = [];
+  if (targetPick.primary) packedTargets.push(packAdviceLevel(targetPick.primary, price, { role: 'primary' }));
+  if (targetPick.next) packedTargets.push(packAdviceLevel(targetPick.next, price, { role: 'next' }));
+  if (targetPick.stretch) packedTargets.push(packAdviceLevel(targetPick.stretch, price, { role: 'stretch' }));
+
+  let rr = null;
+  if (packedStop && packedTargets[0]) {
+    const risk = Math.abs(price - packedStop.price);
+    const reward = Math.abs(packedTargets[0].price - price);
+    if (risk > 0) rr = round4(reward / risk);
+  }
+
+  const knownN = forecast.knownN || 0;
+  const passN = forecast.passN || 0;
+  let confidence = knownN ? passN / knownN : 0;
+  if (mapped.action === 'wait') confidence = Math.min(confidence, 0.45);
+  if (light) confidence = Math.min(confidence, 0.6);
+  if (mapped.action !== 'wait' && !light) confidence = Math.max(confidence, 0.55);
+  confidence = round4(Math.max(0, Math.min(1, confidence)));
+
+  const entry = {
+    price,
+    text: fmtAdvicePx(price, price),
+    note: '现价参考，市价想象，看板不下单',
+  };
+
+  const miss = Array.isArray(missing) ? missing.filter(Boolean) : [];
+  const horizonNote = '超短线：1m 触发、5m 确认、15m 结构；1h 近端结构；4h/1d/1w 只作背景。';
+  const planNote = mapped.action === 'wait'
+    ? (planSide === 'long'
+      ? '当前等待，下面为止盈止损预案（若之后按偏多动手）。'
+      : planSide === 'short'
+        ? '当前等待，下面为止盈止损预案（若之后按偏空动手）。'
+        : '当前等待，方向未明，先不当开仓。')
+    : (mapped.action === 'long' ? '按做多给出止盈止损。' : '按做空给出止盈止损。');
+
+  return {
+    ok: true,
+    coin,
+    symbol,
+    horizon: 'scalp',
+    horizonLabel: '超短线',
+    horizonNote,
+    price,
+    priceText: fmtAdvicePx(price, price),
+    action: mapped.action,
+    actionLabel: mapped.actionLabel,
+    waitLabel: mapped.waitLabel || null,
+    size,
+    sizeLabel,
+    light,
+    confidence,
+    badge: forecast.badge,
+    pred: forecast.pred,
+    entry,
+    stop: packedStop,
+    targets: packedTargets,
+    rr,
+    rrText: rr == null ? '--' : rr.toFixed(2),
+    planOnly: mapped.action === 'wait',
+    planSide,
+    planNote,
+    forecast: {
+      side: forecast.side,
+      badge: forecast.badge,
+      votes: forecast.votes,
+      meta: forecast.meta,
+      passN: forecast.passN,
+      knownN: forecast.knownN,
+      failed: forecast.failed,
+      checks: forecast.checks,
+      rebound: forecast.rebound,
+      dump: forecast.dump,
+    },
+    missing: miss,
+    disclaimer: '看板分析，不下单。' + horizonNote,
+    fetchedAt: Date.now(),
+  };
+}
+

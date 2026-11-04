@@ -457,6 +457,182 @@ body {
 .ema-temp-msg.err { color: var(--up); }
 .ema-temp-msg.ok { color: var(--teal); }
 
+.ema-advice-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px dashed rgba(56, 189, 164, 0.45);
+  background: rgba(56, 189, 164, 0.07);
+}
+
+.ema-advice-label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--teal);
+}
+
+.ema-advice-input {
+  width: min(160px, 42vw);
+  appearance: none;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.ema-advice-input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 164, 0.7);
+  box-shadow: 0 0 0 2px rgba(56, 189, 164, 0.16);
+}
+
+.ema-advice-btn {
+  appearance: none;
+  border: 1px solid rgba(56, 189, 164, 0.55);
+  background: rgba(56, 189, 164, 0.16);
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.ema-advice-btn:hover { background: rgba(56, 189, 164, 0.24); }
+.ema-advice-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.ema-advice-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.ema-advice-msg {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-height: 1em;
+}
+.ema-advice-msg.err { color: var(--up); }
+.ema-advice-msg.ok { color: var(--teal); }
+
+.ema-advice-out {
+  margin: 0 0 12px;
+}
+
+.ema-advice-card {
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  padding: 10px 12px;
+}
+
+.ema-advice-card.is-long { border-color: rgba(56, 189, 164, 0.45); }
+.ema-advice-card.is-short { border-color: rgba(239, 83, 80, 0.45); }
+.ema-advice-card.is-wait { border-color: rgba(210, 153, 34, 0.4); }
+
+.ema-advice-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.ema-advice-sym {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.ema-advice-px {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-secondary);
+}
+
+.ema-advice-action {
+  font-size: 16px;
+  font-weight: 750;
+}
+.ema-advice-card.is-long .ema-advice-action { color: var(--teal); }
+.ema-advice-card.is-short .ema-advice-action { color: var(--up); }
+.ema-advice-card.is-wait .ema-advice-action { color: var(--amber); }
+
+.ema-advice-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.ema-advice-cell {
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ema-advice-k {
+  display: block;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.04em;
+}
+
+.ema-advice-v {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.ema-advice-s {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.ema-advice-reason,
+.ema-advice-plan {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.ema-advice-json {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 6px;
+}
+
+.ema-advice-json summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.ema-advice-json pre {
+  margin: 6px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .ema-section-head {
   display: flex;
   align-items: baseline;
@@ -3136,6 +3312,7 @@ a.signal-token-symbol:hover {
   .ema-qual-votes { margin-left: 0; text-align: left; }
   .ema-qual-row { grid-template-columns: 16px minmax(0, 1fr); }
   .ema-qual-val { text-align: left; grid-column: 2; }
+  .ema-advice-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 500px) {

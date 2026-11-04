@@ -10,6 +10,10 @@ import {
   annotateMacdKdjContext,
   annotateKeltnerWithHtfAdx,
   attachAlphaTrend,
+  evaluateLtfPulse,
+  annotateLtfPair,
+  parseTradeSymbol,
+  buildTradeAdvice,
   resampleLast,
   toDominanceKlines,
   INTERVAL_MS,
@@ -42,8 +46,16 @@ const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; CryptoDashboard/1.0)',
   Accept: 'application/json',
 };
-export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT) {
+function klineMinBars(interval, opts = {}) {
+  if (Number.isFinite(Number(opts.minBars))) return Number(opts.minBars);
+  if (interval === '1w') return 40;
+  if (interval === '1d') return 50;
+  return 80;
+}
+
+export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT, opts = {}) {
   const symbols = SYMBOL_ALIASES[symbol] || [symbol];
+  const minBars = klineMinBars(interval, opts);
   let lastErr = null;
   for (const sym of symbols) {
     for (const makeUrl of KLINE_URLS) {
@@ -55,7 +67,7 @@ export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT) 
           continue;
         }
         const data = await res.json();
-        if (Array.isArray(data) && data.length >= 100) return data;
+        if (Array.isArray(data) && data.length >= minBars) return data;
         lastErr = new Error(`klines ${sym} short ${Array.isArray(data) ? data.length : 0}`);
       } catch (e) {
         lastErr = e;
@@ -369,4 +381,102 @@ export async function fetchStrategyBoard(liveUsdtD = null, opts = {}) {
   return enrichBoardMacdKdj(board);
 }
 
-export { mergeBoards };
+const ADVICE_LIMITS = {
+  '1m': 160,
+  '5m': 160,
+  '15m': 160,
+  '1h': 320,
+  '4h': 320,
+  '1d': 120,
+  '1w': 100,
+};
+
+function rowOrNull(fn) {
+  try {
+    return fn();
+  } catch {
+    return null;
+  }
+}
+
+/** 任意 USDT 币对：拉 1m–1w，按开仓资格给出超短线做多/做空/等待 + 止盈止损。 */
+export async function analyzeOneSymbol(raw) {
+  const parsed = parseTradeSymbol(raw);
+  if (!parsed) {
+    return { ok: false, status: 400, error: '请输入有效币对，如 btcusdt 或 BTC' };
+  }
+  const { coin, symbol } = parsed;
+  const fetchOne = async (interval) => {
+    try {
+      return await fetchKlines(symbol, interval, ADVICE_LIMITS[interval], {
+        minBars: klineMinBars(interval),
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const [k1m, k5m, k15, k1h, k4h, k1d, k1w] = await Promise.all([
+    fetchOne('1m'),
+    fetchOne('5m'),
+    fetchOne('15m'),
+    fetchOne('1h'),
+    fetchOne('4h'),
+    fetchOne('1d'),
+    fetchOne('1w'),
+  ]);
+
+  if (!k1m && !k5m && !k15 && !k1h && !k4h && !k1d) {
+    return { ok: false, status: 404, coin, symbol, error: `币安未找到 ${symbol} 或 K 线不足` };
+  }
+
+  let r1m = k1m ? rowOrNull(() => evaluateLtfPulse(k1m, coin, { interval: '1m' })) : null;
+  let r5m = k5m ? rowOrNull(() => evaluateLtfPulse(k5m, coin, { interval: '5m' })) : null;
+  const pair = annotateLtfPair(r1m, r5m);
+  r1m = pair.row1m;
+  r5m = pair.row5m;
+
+  const row15 = k15 ? rowOrNull(() => evaluateEmaTrendStrategy(k15, coin, { interval: '15m' })) : null;
+  const r15 = row15 ? rowOrNull(() => attachAlphaTrend(row15, k15, { interval: '15m' })) : null;
+  const row1h = k1h ? rowOrNull(() => evaluateEmaTrendStrategy(k1h, coin, { interval: '1h' })) : null;
+  const r1h = row1h ? rowOrNull(() => attachAlphaTrend(row1h, k1h, { interval: '1h' })) : null;
+  const h4 = k4h ? rowOrNull(() => evaluateHtfContext(k4h, coin, { interval: '4h' })) : null;
+  const d1 = k1d ? rowOrNull(() => evaluateHtfContext(k1d, coin, { interval: '1d' })) : null;
+  const w1 = k1w ? rowOrNull(() => evaluateHtfContext(k1w, coin, { interval: '1w' })) : null;
+
+  if (r15 && r15.keltner) {
+    r15.keltner = annotateKeltnerWithHtfAdx(r15.keltner, {
+      filterAdx: r1h && r1h.adx,
+      filterTf: '1h',
+      bgAdx: h4 && h4.adx,
+      bgTf: '4h',
+      localAdx: r15.adx,
+      localTf: '15m',
+    });
+  }
+  if (r1h && r1h.keltner) {
+    r1h.keltner = annotateKeltnerWithHtfAdx(r1h.keltner, {
+      filterAdx: (h4 && h4.adx) || r1h.adx,
+      filterTf: h4 && h4.adx ? '4h' : '1h',
+      bgAdx: null,
+      bgTf: null,
+      localAdx: r1h.adx,
+      localTf: '1h',
+    });
+  }
+
+  const missing = [];
+  if (!r1m) missing.push('1m');
+  if (!r5m) missing.push('5m');
+  if (!r15) missing.push('15m');
+  if (!r1h) missing.push('1h');
+  if (!h4) missing.push('4h');
+  if (!d1) missing.push('1d');
+  if (!w1) missing.push('1w');
+
+  const advice = buildTradeAdvice({ coin, symbol, r1m, r5m, r15, r1h, h4, d1, w1, missing });
+  if (!advice.ok) return { ...advice, status: 422 };
+  return advice;
+}
+
+export { mergeBoards, parseTradeSymbol };

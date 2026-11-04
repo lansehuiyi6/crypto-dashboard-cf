@@ -1,7 +1,7 @@
 import { SignalStore, getStore } from './store.js';
 import { assembleMarketSignals } from './market-signals.js';
 import { fetchBinancePrices, fetchGlobalOverview, inverseHint } from './live-market.js';
-import { fetchStrategyBoard, fetchUsdtDStrategies, normalizeBoard, boardHasRows, mergeBoards } from './ema-strategy.js';
+import { fetchStrategyBoard, fetchUsdtDStrategies, normalizeBoard, boardHasRows, mergeBoards, analyzeOneSymbol } from './ema-strategy.js';
 
 export { SignalStore };
 
@@ -13,12 +13,13 @@ const cors = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-function json(data, status = 200) {
+function json(data, status = 200, extraHeaders = null) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       ...cors,
+      ...(extraHeaders || {}),
     },
   });
 }
@@ -279,6 +280,37 @@ async function handleApi(request, env, ctx) {
       fetchedAt: Date.now(),
       errors: cached.errors || ['币安 K 线暂不可用，等待扫描写入'],
     });
+  }
+
+  if (pathname === '/api/trade-advice' || pathname.startsWith('/api/trade-advice/')) {
+    if (request.method !== 'GET' && request.method !== 'POST') {
+      return json({ ok: false, error: 'method not allowed' }, 405);
+    }
+    let raw = '';
+    const m = pathname.match(/^\/api\/trade-advice\/([^/]+)$/);
+    if (m) {
+      try { raw = decodeURIComponent(m[1]); } catch { raw = m[1]; }
+    }
+    if (!raw) raw = url.searchParams.get('symbol') || url.searchParams.get('pair') || '';
+    if (!raw && request.method === 'POST') {
+      const body = await request.json().catch(() => null);
+      if (body && typeof body === 'object') raw = body.symbol || body.pair || '';
+    }
+    if (!String(raw).trim()) {
+      return json({ ok: false, error: '请输入币对，如 btcusdt' }, 400);
+    }
+    try {
+      const result = await analyzeOneSymbol(raw);
+      if (!result.ok) {
+        const status = result.status || 422;
+        const body = { ...result };
+        delete body.status;
+        return json(body, status);
+      }
+      return json(result, 200, { 'Cache-Control': 'public, max-age=15' });
+    } catch (e) {
+      return json({ ok: false, error: e.message || '分析失败' }, e.status || 502);
+    }
   }
 
   if (pathname === '/api/market-signals') {

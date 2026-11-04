@@ -17,6 +17,7 @@ import {
   EXEC_INTERVALS,
   HTF_INTERVALS,
   BOARD_INTERVALS,
+  parseTradeSymbol,
 } from './ema-core.js';
 import { SCALP_SYMBOLS, evaluateScalp } from './scalp-core.js';
 import { loadPb80, pb80StripHtml, setPb80Repaint } from './pb80-live.js';
@@ -236,14 +237,7 @@ function pruneCoinFromBoard(coin) {
 }
 
 function normalizeTempPairInput(raw) {
-  let s = String(raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (!s) return null;
-  if (s.endsWith('USD') && !s.endsWith('USDT')) s += 'T';
-  if (!s.endsWith('USDT')) s += 'USDT';
-  const coin = s.slice(0, -4);
-  if (!coin || coin.length < 2 || coin.length > 15) return null;
-  if (!/^[A-Z0-9]+$/.test(coin)) return null;
-  return { coin, symbol: s };
+  return parseTradeSymbol(raw);
 }
 
 function formatTempTtl(addedAt) {
@@ -425,6 +419,122 @@ async function addTempPairFromUi() {
     setTempPairMsg(e.message || '添加失败', 'err');
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+function setAdviceMsg(text, kind = '') {
+  const el = document.getElementById('emaAdviceMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.remove('ok', 'err');
+  if (kind) el.classList.add(kind);
+}
+
+function adviceCell(k, v, s) {
+  return `<div class="ema-advice-cell">
+    <span class="ema-advice-k">${escText(k)}</span>
+    <span class="ema-advice-v">${escText(v)}</span>
+    <span class="ema-advice-s">${escText(s || '')}</span>
+  </div>`;
+}
+
+function renderTradeAdvice(data) {
+  const box = document.getElementById('emaAdviceOut');
+  if (!box) return;
+  if (!data || !data.ok) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  const cls = data.action === 'long' ? 'is-long' : data.action === 'short' ? 'is-short' : 'is-wait';
+  const actionText = data.action === 'wait' && data.waitLabel
+    ? `${data.actionLabel} · ${data.waitLabel}`
+    : (data.size === 'light' ? `${data.actionLabel} · ${data.sizeLabel}` : data.actionLabel);
+  const stop = data.stop;
+  const tp = (data.targets && data.targets[0]) || null;
+  const next = (data.targets && data.targets[1]) || null;
+  const stopK = data.planOnly ? '预案止损' : '止损';
+  const tpK = data.planOnly ? '预案止盈' : '止盈';
+  const stopV = stop ? `${stop.text}  (${stop.pctText})` : '--';
+  const stopS = stop ? stop.source : '暂无合适超短线结构';
+  const tpV = tp ? `${tp.text}  (${tp.pctText})` : '--';
+  const tpS = tp
+    ? `${tp.source}${data.rrText && data.rrText !== '--' ? ' · RR ' + data.rrText : ''}`
+    : '暂无合适超短线目标';
+  const nextLine = next
+    ? `<p class="ema-advice-plan">下一目标 ${escText(next.text)} · ${escText(next.source)} (${escText(next.pctText)})</p>`
+    : '';
+  const miss = data.missing && data.missing.length
+    ? `<p class="ema-advice-plan">缺周期：${escText(data.missing.join('、'))}</p>`
+    : '';
+  const reason = (data.pred && data.pred.reason) || '';
+  const jsonText = JSON.stringify(data, null, 2);
+  box.hidden = false;
+  box.innerHTML = `<article class="ema-advice-card ${cls}">
+    <div class="ema-advice-top">
+      <span class="ema-advice-sym">${escText(data.symbol)}</span>
+      <span class="ema-advice-px">${escText(data.priceText)}</span>
+      <span class="strategy-tag ${data.action === 'wait' ? 'watch' : data.action}">${escText(data.badge || '')}</span>
+      <span class="ema-advice-action">${escText(actionText)}</span>
+    </div>
+    <div class="ema-advice-grid">
+      ${adviceCell('入场', data.entry ? data.entry.text : data.priceText, '现价参考')}
+      ${adviceCell(stopK, stopV, stopS)}
+      ${adviceCell(tpK, tpV, tpS)}
+    </div>
+    ${nextLine}
+    <p class="ema-advice-reason">${escText(reason)}</p>
+    <p class="ema-advice-plan">${escText(data.planNote || '')}</p>
+    ${miss}
+    <details class="ema-advice-json">
+      <summary>接口原始 JSON</summary>
+      <pre>${escText(jsonText)}</pre>
+    </details>
+  </article>`;
+}
+
+async function runTradeAdviceFromUi() {
+  const input = document.getElementById('emaAdviceSymbol');
+  const btn = document.getElementById('emaAdviceBtn');
+  const parsed = parseTradeSymbol(input && input.value);
+  if (!parsed) {
+    setAdviceMsg('请输入有效币对，如 btcusdt', 'err');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  renderTradeAdvice(null);
+  setAdviceMsg(`正在分析 ${parsed.symbol}…`);
+  try {
+    const res = await fetch('/api/trade-advice?symbol=' + encodeURIComponent(parsed.symbol));
+    const data = await res.json();
+    if (!data || !data.ok) {
+      renderTradeAdvice(null);
+      setAdviceMsg((data && data.error) || `分析失败 (${res.status})`, 'err');
+      return;
+    }
+    renderTradeAdvice(data);
+    const sl = data.stop ? `止损 ${data.stop.text}` : '无止损';
+    const tp = data.targets && data.targets[0] ? `止盈 ${data.targets[0].text}` : '无止盈';
+    setAdviceMsg(`${data.actionLabel} · ${sl} · ${tp}`, data.action === 'wait' ? '' : 'ok');
+  } catch (e) {
+    renderTradeAdvice(null);
+    setAdviceMsg(e.message || '分析失败', 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initTradeAdviceUi() {
+  const input = document.getElementById('emaAdviceSymbol');
+  const btn = document.getElementById('emaAdviceBtn');
+  if (btn) btn.addEventListener('click', () => { runTradeAdviceFromUi().catch(() => {}); });
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        runTradeAdviceFromUi().catch(() => {});
+      }
+    });
   }
 }
 
@@ -3958,6 +4068,7 @@ document.getElementById('refreshBtn').addEventListener('click', () => {
 
 initEmaNotifyUi();
 initTempPairUi();
+initTradeAdviceUi();
 setPb80Repaint(() => {
   if (lastEmaBoard) renderEmaCards(lastEmaBoard);
 });

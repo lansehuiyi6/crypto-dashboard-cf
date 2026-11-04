@@ -85,6 +85,14 @@
           <span class="ema-temp-hint">临时 24h；可转本机常驻；系统六种不变</span>
           <span class="ema-temp-msg" id="emaTempMsg" role="status"></span>
         </div>
+        <div class="ema-advice-bar" id="emaAdviceBar">
+          <label class="ema-advice-label" for="emaAdviceSymbol">超短线分析</label>
+          <input type="text" id="emaAdviceSymbol" class="ema-advice-input" placeholder="如 btcusdt" autocomplete="off" spellcheck="false" maxlength="20">
+          <button type="button" class="ema-advice-btn" id="emaAdviceBtn">分析</button>
+          <span class="ema-advice-hint">走 /api/trade-advice · 1m 触发 / 5m 确认 / 15m 结构</span>
+          <span class="ema-advice-msg" id="emaAdviceMsg" role="status"></span>
+        </div>
+        <div class="ema-advice-out" id="emaAdviceOut" hidden></div>
         <details class="ema-board-help">
           <summary>策略说明</summary>
           <div class="ema-board-desc">
@@ -97,6 +105,7 @@
             <p><strong>周线 MACD</strong>(12,26,9) 看上一根已收盘周 K 的柱：&gt;0 偏多只开多，&lt;0 偏空只开空。本周柱仅作对照（未收）。成交量用各周期已收盘 K 相对均量，并标上涨/下跌。另外单独看量能振荡：量的 EMA5 比 EMA10 高出 20 以上才标爆量。</p>
             <p><strong>结构位</strong>只在 1 小时和 4 小时上标最近一个已确认的支撑和阻力（左右各 15 根才确认）。收盘还在支撑上是支撑有效，收盘到了下面是支撑已破；这根正好穿过去、又带着爆量，并且 EMA10 在 EMA30 的顺势一侧，才写成爆量跌破或爆量突破。同一栏再叠拐点通道（邻近拐点收成带）：支撑带 / 阻力带 / 价在通道内；收盘穿出上沿或下沿只标通道试破，没有量能过滤。卡片上先看点和带，完整句子收在「原文」里。这层不开单。</p>
             <p><strong>1m UT Bot</strong>用 ATR(10)×1.0 跟踪止损。上穿可作 1m 触发补充（仍要 5m 跟上），列上显示 UT多/UT空和止损价。不替换 AlphaTrend，不进共振。</p>
+            <p><strong>超短线分析</strong>输入币对走 <code>/api/trade-advice</code>，按开仓资格推荐做多/做空/等待，止损优先 1m UT，止盈优先 15m/1h 结构。看板不下单，不改共振。</p>
             <p><strong>MACD+KDJ</strong>：柱&gt;0 且 DIF&gt;DEA 入场；K/D/J 全&gt;80 离场（≠反手做空）。</p>
             <p><strong>Keltner 回归</strong>：外轨刺破武装 → 内轨回踩入场 → 中轨止盈 / 外轨止损。单边过滤用更高周期 ADX（15m→1h，1h→4h）；≥25 慎用，&lt;20 更友好。不进共振。</p>
           </div>
