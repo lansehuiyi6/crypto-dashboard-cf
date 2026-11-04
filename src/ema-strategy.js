@@ -37,15 +37,30 @@ const KLINE_LIMIT = 160;
 const SYMBOL_ALIASES = {
   XAUUSDT: ['XAUUSDT', 'PAXGUSDT'],
 };
-const KLINE_URLS = [
-  (s, i, n) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${i}&limit=${n}`,
-  (s, i, n) => `https://data-api.binance.vision/api/v3/klines?symbol=${s}&interval=${i}&limit=${n}`,
-  (s, i, n) => `https://fapi.binance.com/fapi/v1/klines?symbol=${s}&interval=${i}&limit=${n}`,
-];
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (compatible; CryptoDashboard/1.0)',
   Accept: 'application/json',
 };
+const BYBIT_INTERVAL = {
+  '1m': '1',
+  '5m': '5',
+  '15m': '15',
+  '1h': '60',
+  '4h': '240',
+  '1d': 'D',
+  '1w': 'W',
+};
+const OKX_BAR = {
+  '1m': '1m',
+  '5m': '5m',
+  '15m': '15m',
+  '1h': '1H',
+  '4h': '4H',
+  '1d': '1D',
+  '1w': '1W',
+};
+const BLOCKED_STATUS = new Set([403, 415, 418, 451]);
+
 function klineMinBars(interval, opts = {}) {
   if (Number.isFinite(Number(opts.minBars))) return Number(opts.minBars);
   if (interval === '1w') return 40;
@@ -53,26 +68,156 @@ function klineMinBars(interval, opts = {}) {
   return 80;
 }
 
+function usdtBase(symbol) {
+  const s = String(symbol || '');
+  return s.endsWith('USDT') ? s.slice(0, -4) : s;
+}
+
+function toBinanceRows(bars) {
+  return bars.map((b) => [
+    Number(b.t),
+    String(b.o),
+    String(b.h),
+    String(b.l),
+    String(b.c),
+    String(b.v),
+    Number(b.t),
+    String(b.q || 0),
+  ]);
+}
+
+async function fetchJson(url, timeoutMs = 4000) {
+  const ac = typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined;
+  const res = await fetch(url, { headers: FETCH_HEADERS, signal: ac });
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+  return { res, data };
+}
+
+function acceptKlines(data, minBars) {
+  return Array.isArray(data) && data.length >= minBars ? data : null;
+}
+
+async function fetchBinanceKlines(sym, interval, limit, minBars) {
+  const urls = [
+    `https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
+    `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
+    `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
+    `https://api.binance.us/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
+  ];
+  let lastErr = null;
+  let blocked = false;
+  for (const url of urls) {
+    if (blocked && /binance\.com/.test(url)) continue;
+    try {
+      const { res, data } = await fetchJson(url);
+      if (BLOCKED_STATUS.has(res.status)) {
+        blocked = true;
+        lastErr = new Error(`klines ${sym} ${res.status}`);
+        continue;
+      }
+      if (!res.ok) {
+        lastErr = new Error(`klines ${sym} ${res.status}`);
+        continue;
+      }
+      const rows = acceptKlines(data, minBars);
+      if (rows) return rows;
+      lastErr = new Error(`klines ${sym} short ${Array.isArray(data) ? data.length : 0}`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error(`klines ${sym} failed`);
+}
+
+async function fetchBybitKlines(sym, interval, limit, minBars) {
+  const iv = BYBIT_INTERVAL[interval];
+  if (!iv) throw new Error(`bybit interval ${interval}`);
+  const n = Math.min(Math.max(limit, minBars), 1000);
+  let lastErr = null;
+  for (const category of ['linear', 'spot']) {
+    const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${sym}&interval=${iv}&limit=${n}`;
+    try {
+      const { res, data } = await fetchJson(url);
+      if (!res.ok) {
+        lastErr = new Error(`bybit ${sym} ${res.status}`);
+        continue;
+      }
+      const list = data && data.result && Array.isArray(data.result.list) ? data.result.list : [];
+      if (list.length < minBars) {
+        lastErr = new Error(`bybit ${sym} short ${list.length}`);
+        continue;
+      }
+      const oldest = list.slice().reverse();
+      return toBinanceRows(oldest.map((row) => ({
+        t: Number(row[0]),
+        o: row[1],
+        h: row[2],
+        l: row[3],
+        c: row[4],
+        v: row[5],
+        q: row[6],
+      })));
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error(`bybit ${sym} failed`);
+}
+
+async function fetchOkxKlines(sym, interval, limit, minBars) {
+  const bar = OKX_BAR[interval];
+  if (!bar) throw new Error(`okx interval ${interval}`);
+  const n = Math.min(Math.max(limit, minBars), 300);
+  const base = usdtBase(sym);
+  let lastErr = null;
+  for (const inst of [`${base}-USDT-SWAP`, `${base}-USDT`]) {
+    const url = `https://www.okx.com/api/v5/market/candles?instId=${inst}&bar=${bar}&limit=${n}`;
+    try {
+      const { res, data } = await fetchJson(url);
+      if (!res.ok) {
+        lastErr = new Error(`okx ${inst} ${res.status}`);
+        continue;
+      }
+      const list = data && data.code === '0' && Array.isArray(data.data) ? data.data : [];
+      if (list.length < minBars) {
+        lastErr = new Error(`okx ${inst} short ${list.length}`);
+        continue;
+      }
+      const oldest = list.slice().reverse();
+      return toBinanceRows(oldest.map((row) => ({
+        t: Number(row[0]),
+        o: row[1],
+        h: row[2],
+        l: row[3],
+        c: row[4],
+        v: row[5],
+        q: row[6],
+      })));
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error(`okx ${sym} failed`);
+}
+
 export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT, opts = {}) {
   const symbols = SYMBOL_ALIASES[symbol] || [symbol];
   const minBars = klineMinBars(interval, opts);
   let lastErr = null;
+  // Cloudflare 机房常被币安 451/403。先走 Bybit/OKX，再试币安，避免打光子请求。
   for (const sym of symbols) {
-    for (const makeUrl of KLINE_URLS) {
-      const url = makeUrl(sym, interval, limit);
-      try {
-        const res = await fetch(url, { headers: FETCH_HEADERS });
-        if (!res.ok) {
-          lastErr = new Error(`klines ${sym} ${res.status}`);
-          continue;
-        }
-        const data = await res.json();
-        if (Array.isArray(data) && data.length >= minBars) return data;
-        lastErr = new Error(`klines ${sym} short ${Array.isArray(data) ? data.length : 0}`);
-      } catch (e) {
-        lastErr = e;
-      }
-    }
+    try {
+      return await fetchBybitKlines(sym, interval, limit, minBars);
+    } catch (e) { lastErr = e; }
+    try {
+      return await fetchOkxKlines(sym, interval, limit, minBars);
+    } catch (e) { lastErr = e; }
+    try {
+      return await fetchBinanceKlines(sym, interval, limit, minBars);
+    } catch (e) { lastErr = e; }
   }
   throw lastErr || new Error(`klines ${symbol} failed`);
 }
@@ -406,12 +551,14 @@ export async function analyzeOneSymbol(raw) {
     return { ok: false, status: 400, error: '请输入有效币对，如 btcusdt 或 BTC' };
   }
   const { coin, symbol } = parsed;
+  const fetchErrors = [];
   const fetchOne = async (interval) => {
     try {
       return await fetchKlines(symbol, interval, ADVICE_LIMITS[interval], {
         minBars: klineMinBars(interval),
       });
-    } catch {
+    } catch (e) {
+      fetchErrors.push(`${interval}: ${e && e.message ? e.message : e}`);
       return null;
     }
   };
@@ -427,7 +574,14 @@ export async function analyzeOneSymbol(raw) {
   ]);
 
   if (!k1m && !k5m && !k15 && !k1h && !k4h && !k1d) {
-    return { ok: false, status: 404, coin, symbol, error: `币安未找到 ${symbol} 或 K 线不足` };
+    return {
+      ok: false,
+      status: 404,
+      coin,
+      symbol,
+      error: `行情源暂不可用（${symbol}）。Cloudflare 访问币安常被拦，已尝试 Bybit/OKX。`,
+      detail: fetchErrors,
+    };
   }
 
   let r1m = k1m ? rowOrNull(() => evaluateLtfPulse(k1m, coin, { interval: '1m' })) : null;

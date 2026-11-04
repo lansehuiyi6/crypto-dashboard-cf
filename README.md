@@ -98,7 +98,7 @@ EMA7/21/56、AlphaTrend（ATR）、布林带宽/%B、BOLL 中轴开仓，见 [do
 | `/api/signals` | 读已发布信号 |
 | `/api/market-signals` | 短线操作面板（支撑/阻力随现价生成） |
 | `/api/ema-strategy` | 15m/1h EMA+AT+布林，4h/1d/1w 背景（页面优先浏览器直连；1m/5m 只在浏览器算） |
-| `/api/trade-advice` | 输入 `btcusdt`，按开仓资格给超短线 做多/做空/等待 + 止盈止损。`GET ?symbol=` / `GET /api/trade-advice/BTCUSDT` / `POST {symbol}` |
+| `/api/trade-advice` | 输入 `btcusdt`，按开仓资格给超短线 做多/做空/等待 + 止盈止损。`GET ?symbol=` / `GET /api/trade-advice/BTCUSDT` / `POST {symbol}`。Worker 先走 Bybit/OKX 拉 K 线（Cloudflare 访问币安常 451） |
 | `/api/overview` | 总市值、BTC.D / ETH.D / USDT.D |
 
 ## 注意事项
