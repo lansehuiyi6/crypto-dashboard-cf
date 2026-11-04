@@ -3720,10 +3720,18 @@ export function buildTradeAdvice(input) {
         : '当前等待，方向未明，先不当开仓。')
     : (mapped.action === 'long' ? '按做多给出止盈止损。' : '按做空给出止盈止损。');
 
+  const adviceBits = [mapped.actionLabel];
+  if (mapped.action === 'wait' && mapped.waitLabel) adviceBits.push(mapped.waitLabel);
+  else if (light) adviceBits.push(sizeLabel);
+  if (packedStop) adviceBits.push(`止损 ${packedStop.text}`);
+  if (packedTargets[0]) adviceBits.push(`止盈 ${packedTargets[0].text}`);
+  const advice = adviceBits.join(' · ');
+
   return {
     ok: true,
     coin,
     symbol,
+    advice,
     horizon: 'scalp',
     horizonLabel: '超短线',
     horizonNote,

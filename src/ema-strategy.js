@@ -59,8 +59,24 @@ const OKX_BAR = {
   '1d': '1D',
   '1w': '1W',
 };
-const BLOCKED_STATUS = new Set([403, 415, 418, 451]);
-
+const BITGET_GRAN = {
+  '1m': '1m',
+  '5m': '5m',
+  '15m': '15m',
+  '1h': '1H',
+  '4h': '4H',
+  '1d': '1D',
+  '1w': '1W',
+};
+const GATE_INTERVAL = {
+  '1m': '1m',
+  '5m': '5m',
+  '15m': '15m',
+  '1h': '1h',
+  '4h': '4h',
+  '1d': '1d',
+  '1w': '7d',
+};
 function klineMinBars(interval, opts = {}) {
   if (Number.isFinite(Number(opts.minBars))) return Number(opts.minBars);
   if (interval === '1w') return 40;
@@ -101,23 +117,16 @@ function acceptKlines(data, minBars) {
 }
 
 async function fetchBinanceKlines(sym, interval, limit, minBars) {
+  // 新币常只有 U 本位合约，没有现货。先 fapi，现货 400 不代表合约没有。
   const urls = [
-    `https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
     `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
+    `https://data-api.binance.vision/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
     `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
-    `https://api.binance.us/api/v3/klines?symbol=${sym}&interval=${interval}&limit=${limit}`,
   ];
   let lastErr = null;
-  let blocked = false;
   for (const url of urls) {
-    if (blocked && /binance\.com/.test(url)) continue;
     try {
       const { res, data } = await fetchJson(url);
-      if (BLOCKED_STATUS.has(res.status)) {
-        blocked = true;
-        lastErr = new Error(`klines ${sym} ${res.status}`);
-        continue;
-      }
       if (!res.ok) {
         lastErr = new Error(`klines ${sym} ${res.status}`);
         continue;
@@ -143,6 +152,11 @@ async function fetchBybitKlines(sym, interval, limit, minBars) {
       const { res, data } = await fetchJson(url);
       if (!res.ok) {
         lastErr = new Error(`bybit ${sym} ${res.status}`);
+        continue;
+      }
+      if (data && Number(data.retCode) !== 0) {
+        lastErr = new Error(`bybit ${sym} ${data.retMsg || data.retCode}`);
+        if (Number(data.retCode) === 10001) continue;
         continue;
       }
       const list = data && data.result && Array.isArray(data.result.list) ? data.result.list : [];
@@ -203,14 +217,78 @@ async function fetchOkxKlines(sym, interval, limit, minBars) {
   throw lastErr || new Error(`okx ${sym} failed`);
 }
 
+async function fetchBitgetKlines(sym, interval, limit, minBars) {
+  const gran = BITGET_GRAN[interval];
+  if (!gran) throw new Error(`bitget interval ${interval}`);
+  const n = Math.min(Math.max(limit, minBars), 1000);
+  let lastErr = null;
+  const mixUrl = `https://api.bitget.com/api/v2/mix/market/candles?symbol=${sym}&productType=USDT-FUTURES&granularity=${gran}&limit=${n}`;
+  try {
+    const { res, data } = await fetchJson(mixUrl);
+    if (!res.ok) {
+      lastErr = new Error(`bitget ${sym} ${res.status}`);
+    } else if (!data || data.code !== '00000') {
+      lastErr = new Error(`bitget ${sym} ${data && data.msg ? data.msg : 'fail'}`);
+    } else {
+      const list = Array.isArray(data.data) ? data.data : [];
+      if (list.length >= minBars) {
+        return toBinanceRows(list.map((row) => ({
+          t: Number(row[0]),
+          o: row[1],
+          h: row[2],
+          l: row[3],
+          c: row[4],
+          v: row[5],
+          q: row[6],
+        })));
+      }
+      lastErr = new Error(`bitget ${sym} short ${list.length}`);
+    }
+  } catch (e) {
+    lastErr = e;
+  }
+  throw lastErr || new Error(`bitget ${sym} failed`);
+}
+
+async function fetchGateKlines(sym, interval, limit, minBars) {
+  const iv = GATE_INTERVAL[interval];
+  if (!iv) throw new Error(`gate interval ${interval}`);
+  const n = Math.min(Math.max(limit, minBars), 1000);
+  const contract = `${usdtBase(sym)}_USDT`;
+  const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=${iv}&limit=${n}`;
+  const { res, data } = await fetchJson(url);
+  if (!res.ok) throw new Error(`gate ${contract} ${res.status}`);
+  if (!Array.isArray(data) || data.length < minBars) {
+    throw new Error(`gate ${contract} short ${Array.isArray(data) ? data.length : 0}`);
+  }
+  return toBinanceRows(data.map((row) => {
+    const t = Number(row.t);
+    return {
+      t: t < 1e12 ? t * 1000 : t,
+      o: row.o,
+      h: row.h,
+      l: row.l,
+      c: row.c,
+      v: row.v,
+      q: row.sum,
+    };
+  }));
+}
+
 export async function fetchKlines(symbol, interval = '1h', limit = KLINE_LIMIT, opts = {}) {
   const symbols = SYMBOL_ALIASES[symbol] || [symbol];
   const minBars = klineMinBars(interval, opts);
   let lastErr = null;
-  // Cloudflare 机房常被币安 451/403。先走 Bybit/OKX，再试币安，避免打光子请求。
+  // Cloudflare 常拦币安。Bybit 覆盖主流；Bitget/Gate 覆盖 IDOL 这类只有合约的新币。
   for (const sym of symbols) {
     try {
       return await fetchBybitKlines(sym, interval, limit, minBars);
+    } catch (e) { lastErr = e; }
+    try {
+      return await fetchBitgetKlines(sym, interval, limit, minBars);
+    } catch (e) { lastErr = e; }
+    try {
+      return await fetchGateKlines(sym, interval, limit, minBars);
     } catch (e) { lastErr = e; }
     try {
       return await fetchOkxKlines(sym, interval, limit, minBars);
@@ -579,7 +657,7 @@ export async function analyzeOneSymbol(raw) {
       status: 404,
       coin,
       symbol,
-      error: `行情源暂不可用（${symbol}）。Cloudflare 访问币安常被拦，已尝试 Bybit/OKX。`,
+      error: `行情源暂不可用（${symbol}）。已尝试 Bybit/Bitget/Gate/OKX/币安。`,
       detail: fetchErrors,
     };
   }

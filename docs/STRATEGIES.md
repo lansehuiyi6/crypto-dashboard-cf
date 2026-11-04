@@ -225,7 +225,8 @@ EWM 对齐 pandas `ewm(..., adjust=False)`，**与**上方「EMA 过滤」里 SM
 - 止损优先 **1m UT**（须在价格正确一侧，约 0.08%–2.5%），其次 15m/1h 拐点或通道；再不行才用中轴 1.5% / EMA 2%。
 - 止盈优先 15m 阻力/支撑或布林中轨，其次 1h 结构；第一目标大约 3% 以内。等待时仍给预案价。
 - 看板测试区走同一 HTTP 接口，不在浏览器重算。不改共振，不推通知，**不下单**。
-- Worker 拉 K 线优先 Bybit（USDT 永续），其次 OKX，再试币安。Cloudflare 机房访问 `api.binance.com` 常被 451/403。
+- Worker 拉 K 线：Bybit → Bitget → Gate → OKX → 币安合约/现货。Cloudflare 访问币安常被拦；IDOL 这类只有永续、Bybit 未上的新币走 Bitget/Gate。
+- JSON 推荐操作看 `advice`（一行摘要）和 `actionLabel`（做多/做空/等待）。
 
 ---
 
