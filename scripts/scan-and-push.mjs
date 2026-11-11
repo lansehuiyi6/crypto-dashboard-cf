@@ -15,6 +15,7 @@ import {
 import { buildMajors } from '../src/market-signals.js';
 import { fetchGlobalOverview } from '../src/live-market.js';
 import { fetchStrategyBoard } from '../src/ema-strategy.js';
+import { buildHlSmartMoney } from '../src/hl-smart-money.js';
 
 const WORKER_URL = (process.env.WORKER_URL || '').replace(/\/$/, '');
 const CRON_SECRET = process.env.CRON_SECRET || '';
@@ -194,6 +195,24 @@ async function main() {
   }
   await ingest('snapshot', { majors, strategies });
   console.log('[scan] majors', Object.keys(majors));
+
+  try {
+    let prev = null;
+    try {
+      const res = await fetch(`${WORKER_URL}/api/hl-smart-money`, { headers: { Accept: 'application/json' } });
+      if (res.ok) prev = await res.json();
+    } catch { /* first run or old worker */ }
+    const hl = await buildHlSmartMoney({ previous: prev && prev.posMap ? prev : null });
+    await ingest('snapshot', { hlSmartMoney: hl });
+    console.log('[scan] hl smart money', {
+      n: hl.scale?.n,
+      withPos: hl.scale?.withPos,
+      lean: hl.scale?.lean,
+      events: hl.events?.length || 0,
+    });
+  } catch (e) {
+    console.warn('[scan] hl smart money failed', e.message);
+  }
 
   const signals = [];
   for (const coin of coins) {

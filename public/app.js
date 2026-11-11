@@ -21,6 +21,7 @@ import {
 } from './ema-core.js';
 import { SCALP_SYMBOLS, evaluateScalp } from './scalp-core.js';
 import { loadPb80, pb80StripHtml, setPb80Repaint } from './pb80-live.js';
+import { loadHlSmartMoney } from './hl-live.js';
 
 const KLINE_LIMIT = 160;
 const CHANNEL_KLINE_LIMIT = 320;
@@ -4059,6 +4060,7 @@ function refreshAll(force = false) {
   loadBottomReversalSignals();
   if (typeof window.loadCreatorStudy === 'function') window.loadCreatorStudy();
   loadPb80({ force, symbols: Object.values(getStrategySymbolMap()) }).catch(() => {});
+  loadHlSmartMoney().catch(() => {});
 }
 
 document.getElementById('refreshBtn').addEventListener('click', () => {
@@ -4076,6 +4078,7 @@ refreshAll();
 setInterval(() => {
   loadPb80({ force: false, symbols: Object.values(getStrategySymbolMap()) }).catch(() => {});
 }, 180000);
+setInterval(() => { loadHlSmartMoney().catch(() => {}); }, 120000);
 setInterval(fetchCoinGeckoPrices, 30000);
 setInterval(fetchGoldPrice, 60000);
 setInterval(fetchOverview, 60000);

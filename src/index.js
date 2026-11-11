@@ -313,6 +313,27 @@ async function handleApi(request, env, ctx) {
     }
   }
 
+  if (pathname === '/api/hl-smart-money') {
+    const snap = await readSnapshot(env);
+    const packed = snap.hlSmartMoney;
+    const data = packed?.data;
+    if (data && (data.scale || (Array.isArray(data.events) && data.events.length))) {
+      return json({
+        ...data,
+        source: 'snapshot',
+        fetchedAt: packed.timestamp || data.asOf || Date.now(),
+      }, 200, { 'Cache-Control': 'public, max-age=60' });
+    }
+    return json({
+      ok: true,
+      source: 'empty',
+      scale: null,
+      events: [],
+      fetchedAt: Date.now(),
+      hint: '等待定时扫描写入 Hyperliquid 聪明钱快照',
+    }, 200, { 'Cache-Control': 'public, max-age=15' });
+  }
+
   if (pathname === '/api/market-signals') {
     const snap = await readSnapshot(env);
     let prices = snap.prices?.data || {};

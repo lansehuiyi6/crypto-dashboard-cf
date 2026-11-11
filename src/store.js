@@ -461,6 +461,7 @@ export class SignalStore {
       majors: this.getValue('snapshot_majors'),
       global: this.getValue('snapshot_global'),
       strategies: this.getValue('snapshot_strategies'),
+      hlSmartMoney: this.getValue('snapshot_hl_smart_money'),
     });
   }
 
@@ -536,6 +537,7 @@ export class SignalStore {
       if (body.majors) this.putValue('snapshot_majors', { data: body.majors, timestamp: Date.now() });
       if (body.global) this.putValue('snapshot_global', { data: body.global, timestamp: Date.now() });
       if (body.strategies) this.putValue('snapshot_strategies', { data: body.strategies, timestamp: Date.now() });
+      if (body.hlSmartMoney) this.putValue('snapshot_hl_smart_money', { data: body.hlSmartMoney, timestamp: Date.now() });
       return json({ ok: true });
     }
 
